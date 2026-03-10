@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv pip:*)",
+      "Bash(uv run python3 -c \":*)",
+      "Bash(python3 -c \":*)",
+      "Bash(sed -i '' 's/\"\"model\"\": \"\"anthropic\\\\/claude-opus-4-5\"\"/\"\"model\"\": \"\"gemini-2.0-flash\"\"/' /Users/niuzj/.nanobot/config.json)",
+      "Bash(grep '\"\"model\"\"' /Users/niuzj/.nanobot/config.json)",
+      "Bash(python -c \"from nanobot.cli.commands import app; print\\(''''OK''''\\)\")",
+      "Bash(uv run:*)",
+      "Bash(/Users/niuzj/Desktop/OpenCreator-ai/nanobot/.venv/bin/python3 -c \"import nanobot.cli.commands; print\\(nanobot.cli.commands.__file__\\)\")",
+      "Bash(rm -rf /Users/niuzj/Desktop/OpenCreator-ai/nanobot/.venv/lib/python3.12/site-packages/nanobot/)",
+      "Bash(/Users/niuzj/Desktop/OpenCreator-ai/nanobot/.venv/bin/python3 -c \"import nanobot; print\\(nanobot.__file__\\)\")",
+      "Bash(/Users/niuzj/Desktop/OpenCreator-ai/nanobot/.venv/bin/python3 -c \"import sys; print\\([p for p in sys.path if ''nanobot'' in p.lower\\(\\)]\\)\")",
+      "Bash(/Users/niuzj/Desktop/OpenCreator-ai/nanobot/.venv/bin/python3 -c \"import sys; print\\(sys.path\\)\")",
+      "Bash(xxd /Users/niuzj/Desktop/OpenCreator-ai/nanobot/.venv/lib/python3.12/site-packages/_nanobot_ai.pth)",
+      "Bash(PYTHONPATH=/Users/niuzj/Desktop/OpenCreator-ai/nanobot /Users/niuzj/Desktop/OpenCreator-ai/nanobot/.venv/bin/python3 -c \":*)"
+    ]
+  }
+}

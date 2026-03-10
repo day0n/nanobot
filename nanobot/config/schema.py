@@ -240,6 +240,14 @@ class AgentsConfig(Base):
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
 
 
+class VertexGeminiConfig(Base):
+    """Vertex AI Gemini provider configuration (service account auth)."""
+
+    oc_json: str = ""  # GOOGLE_OC_JSON — base64-encoded service account JSON
+    project: str = ""  # GOOGLE_CLOUD_PROJECT
+    location: str = "us-central1"  # GOOGLE_CLOUD_LOCATION
+
+
 class ProviderConfig(Base):
     """LLM provider configuration."""
 
@@ -269,6 +277,7 @@ class ProvidersConfig(Base):
     volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine (火山引擎)
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
+    vertex_gemini: VertexGeminiConfig = Field(default_factory=VertexGeminiConfig)  # Vertex AI Gemini (service account)
 
 
 class HeartbeatConfig(Base):
@@ -284,6 +293,17 @@ class GatewayConfig(Base):
     host: str = "0.0.0.0"
     port: int = 18790
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+
+
+class ApiServerConfig(Base):
+    """nanobot API server configuration."""
+
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 18791
+    clerk_pem_public_key: str = ""  # Clerk RS256 PEM public key
+    internal_api_base: str = ""  # e.g. "https://api-develop.opencreator.io"
+    internal_api_key: str = ""  # Internal API key (plaintext, Base64 encoding handled internally)
 
 
 class WebSearchConfig(Base):
@@ -338,6 +358,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    api: ApiServerConfig = Field(default_factory=ApiServerConfig)
 
     @property
     def workspace_path(self) -> Path:

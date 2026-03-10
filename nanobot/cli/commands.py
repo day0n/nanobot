@@ -216,6 +216,17 @@ def _make_provider(config: Config):
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
     from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
 
+    # Vertex AI Gemini: checked first — uses service account credentials, not api_key
+    vc = config.providers.vertex_gemini
+    if vc.oc_json and vc.project:
+        from nanobot.providers.vertex_gemini_provider import VertexGeminiProvider
+        return VertexGeminiProvider(
+            oc_json_b64=vc.oc_json,
+            project=vc.project,
+            location=vc.location,
+            default_model=config.agents.defaults.model,
+        )
+
     model = config.agents.defaults.model
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
@@ -469,6 +480,31 @@ def gateway(
     asyncio.run(run())
 
 
+
+
+# ============================================================================
+# API Server
+# ============================================================================
+
+
+@app.command()
+def serve(
+    port: int | None = typer.Option(None, "--port", "-p", help="API server port"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
+    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
+):
+    """Start the nanobot API server (SSE endpoint for agent chat)."""
+    import uvicorn
+
+    from nanobot.api.server import create_app
+
+    cfg = _load_runtime_config(config, workspace)
+    port = port if port is not None else cfg.api.port
+    provider = _make_provider(cfg)
+
+    console.print(f"{__logo__} Starting nanobot API server on port {port}...")
+    fastapi_app = create_app(cfg, provider)
+    uvicorn.run(fastapi_app, host=cfg.api.host, port=port)
 
 
 # ============================================================================

@@ -44,6 +44,12 @@ dependencies = [
     "json-repair>=0.57.0,<1.0.0",
     "chardet>=3.0.2,<6.0.0",
     "openai>=2.8.0",
+    "fastapi>=0.115.0,<1.0.0",
+    "uvicorn[standard]>=0.34.0,<1.0.0",
+    "PyJWT[crypto]>=2.9.0,<3.0.0",
+    "google-auth>=2.0.0,<3.0.0",
+    "google-cloud-aiplatform>=1.0.0,<2.0.0",
+    "google-genai>=1.0.0,<2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -92,7 +98,6 @@ include = [
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
-"bridge" = "nanobot/bridge"
 
 [tool.ruff]
 line-length = 100
