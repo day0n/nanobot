@@ -15,7 +15,8 @@
       "WebFetch(domain:ai.google.dev)",
       "WebFetch(domain:docs.cloud.google.com)",
       "Bash(pkill -f \"nanobot serve\")",
-      "Read(//private/tmp/**)"
+      "Read(//private/tmp/**)",
+      "Bash(chmod +x /Users/niuzj/Desktop/OpenCreator-ai/nanobot/start.sh)"
     ]
   }
 }

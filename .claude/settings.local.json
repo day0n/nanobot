@@ -14,7 +14,12 @@
       "Bash(/Users/niuzj/Desktop/OpenCreator-ai/nanobot/.venv/bin/python3 -c \"import sys; print\\([p for p in sys.path if ''nanobot'' in p.lower\\(\\)]\\)\")",
       "Bash(/Users/niuzj/Desktop/OpenCreator-ai/nanobot/.venv/bin/python3 -c \"import sys; print\\(sys.path\\)\")",
       "Bash(xxd /Users/niuzj/Desktop/OpenCreator-ai/nanobot/.venv/lib/python3.12/site-packages/_nanobot_ai.pth)",
-      "Bash(PYTHONPATH=/Users/niuzj/Desktop/OpenCreator-ai/nanobot /Users/niuzj/Desktop/OpenCreator-ai/nanobot/.venv/bin/python3 -c \":*)"
+      "Bash(PYTHONPATH=/Users/niuzj/Desktop/OpenCreator-ai/nanobot /Users/niuzj/Desktop/OpenCreator-ai/nanobot/.venv/bin/python3 -c \":*)",
+      "Bash(chmod 600 ~/Desktop/opencreator-openclaw.pem && echo \"权限已设置\")",
+      "Bash(ssh-copy-id -i ~/.ssh/id_rsa.pub -o \"IdentityFile=~/Desktop/opencreator-openclaw.pem\" -o \"StrictHostKeyChecking=no\" ubuntu@ec2-15-168-171-123.ap-northeast-3.compute.amazonaws.com)",
+      "Bash(ssh -o ConnectTimeout=10 -o BatchMode=yes opencreator-server \"echo '免密登录成功 hostname:' && hostname\" 2>&1)",
+      "Bash(ssh -i ~/Desktop/opencreator-openclaw.pem ubuntu@ec2-15-168-171-123.ap-northeast-3.compute.amazonaws.com \"echo 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCwX9Tv2x7S6/HfNZJf2I832q4m/29eQ9JS7fR5fGU5pItyvNl9erk7aUpMfKFHDiJgkC3SqlZADVzE5l9xCJpgxMnYs7AbmjSRLL+yBE/15OMtw5ykyt/3Zt1vC30u7vESJP9qXzFhx5N58vN1pS8IipTIe3Q1Kyhb8BnXRDmuiVyfaAQ+APcfbPKnWktzu3ybMqyOBELAPuzdq6PO3RzBUwmTvJR+/v74UGMQO90+yJrRKVH+wQgVhV4OLwgPANc9OxrfFAjnh25F6//KJyVedVFabTnIGd/e8A0/yWSAqZBrKMlVFxWncfxJ93JKYNFUeKY2v9lS0Pa16/YBwVS7FMRNUiG4Eb7MI63TbF8+UpwjoIMYygF5fE8KMhaJRuA6DIiMX8Lc7mykhXBmh+YqzEakImGlAgajxD/91nukMLIanGLnKoXVqz4xPA9flfkeacH83vPUELz9b0fC6dYKt5/4xHWtYrnAtljJApIIqpRnWpoCDT4f4Rawn0dQBqc= niuzj0@gmail.com' >> ~/.ssh/authorized_keys && echo '添加成功'\" 2>&1)",
+      "Bash(ssh -o ConnectTimeout=10 opencreator-server \"echo '免密登录成功！' && hostname\" 2>&1)"
     ]
   }
 }
