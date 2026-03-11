@@ -23,11 +23,8 @@ else
 fi
 
 echo "[4/4] 启动 nanobot (port $PORT, log: $LOG_FILE)..."
-nohup env PYTHONPATH="$SCRIPT_DIR" "$SCRIPT_DIR/.venv/bin/nanobot" serve --port "$PORT" \
-    > "$LOG_FILE" 2>&1 &
+echo "  以前台模式启动，日志将同时输出到终端和 $LOG_FILE"
+echo "  按 Ctrl+C 可停止服务"
 
-echo "  PID: $!"
-echo "  日志: tail -f $LOG_FILE"
-
-sleep 2
-tail -5 "$LOG_FILE"
+env PYTHONPATH="$SCRIPT_DIR" "$SCRIPT_DIR/.venv/bin/nanobot" serve --port "$PORT" \
+    2>&1 | tee "$LOG_FILE"
