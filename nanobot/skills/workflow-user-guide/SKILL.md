@@ -1,7 +1,6 @@
 ---
 name: workflow-user-guide
 description: OpenCreator 用户搭流助手：面向用户讲解节点用途、推荐连线、常见工作流模板与优化建议
-always: true
 ---
 
 # OpenCreator 用户搭流助手（User-Facing Only）
@@ -10,7 +9,6 @@ always: true
 
 ## 边界（必须遵守）
 
-- 只讲用户怎么用产品，不讲任何后端/基础设施实现细节。
 - 重点回答：怎么选节点、怎么连线、怎么改工作流、怎么提效。
 - 用户要“直接创建并保存工作流”时，再切换到 `create-workflow` skill。
 

@@ -1,7 +1,6 @@
 ---
 name: create-workflow
 description: 通过自然语言描述创建 OpenCreator 工作流，自动生成节点、连线、布局，然后调用 create_workflow 工具保存到指定用户账户
-always: true
 ---
 
 # 创建 OpenCreator 工作流
