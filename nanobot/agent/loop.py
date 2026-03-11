@@ -367,6 +367,13 @@ class AgentLoop:
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
+        logger.info(
+            "Inbound message payload channel={} sender_id={} session_key={} content={}",
+            msg.channel,
+            msg.sender_id,
+            session_key or msg.session_key,
+            msg.content,
+        )
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
@@ -437,6 +444,13 @@ class AgentLoop:
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+        logger.info(
+            "Outbound message payload channel={} sender_id={} session_key={} content={}",
+            msg.channel,
+            msg.sender_id,
+            key,
+            final_content,
+        )
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
             metadata=msg.metadata or {},

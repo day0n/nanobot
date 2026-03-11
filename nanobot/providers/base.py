@@ -1,6 +1,7 @@
 """Base LLM provider interface."""
 
 import asyncio
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -77,6 +78,28 @@ class LLMProvider(ABC):
         self.api_key = api_key
         self.api_base = api_base
         self.generation: GenerationSettings = GenerationSettings()
+
+    @staticmethod
+    def _sanitize_log_value(value: Any) -> Any:
+        """Return a log-safe value (redact large data URLs used by multimodal inputs)."""
+        if isinstance(value, str):
+            if value.startswith("data:") and ";base64," in value:
+                return f"[data-url redacted: {len(value)} chars]"
+            return value
+        if isinstance(value, dict):
+            return {k: LLMProvider._sanitize_log_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [LLMProvider._sanitize_log_value(v) for v in value]
+        return value
+
+    @classmethod
+    def _to_log_json(cls, value: Any) -> str:
+        """Convert arbitrary objects to JSON for structured logging."""
+        safe = cls._sanitize_log_value(value)
+        try:
+            return json.dumps(safe, ensure_ascii=False, default=str)
+        except Exception:
+            return str(safe)
 
     @staticmethod
     def _sanitize_empty_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -190,6 +213,23 @@ class LLMProvider(ABC):
         if reasoning_effort is self._SENTINEL:
             reasoning_effort = self.generation.reasoning_effort
 
+        resolved_model = model or self.get_default_model()
+        provider_name = self.__class__.__name__
+        logger.info(
+            "LLM request [{}] model={} payload={}",
+            provider_name,
+            resolved_model,
+            self._to_log_json(
+                {
+                    "messages": messages,
+                    "tools": tools,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "reasoning_effort": reasoning_effort,
+                }
+            ),
+        )
+
         for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
             try:
                 response = await self.chat(
@@ -208,6 +248,30 @@ class LLMProvider(ABC):
                     finish_reason="error",
                 )
 
+            logger.info(
+                "LLM response [{}] model={} attempt={} payload={}",
+                provider_name,
+                resolved_model,
+                attempt,
+                self._to_log_json(
+                    {
+                        "finish_reason": response.finish_reason,
+                        "content": response.content,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "name": tc.name,
+                                "arguments": tc.arguments,
+                            }
+                            for tc in response.tool_calls
+                        ],
+                        "usage": response.usage,
+                        "reasoning_content": response.reasoning_content,
+                        "thinking_blocks": response.thinking_blocks,
+                    }
+                ),
+            )
+
             if response.finish_reason != "error":
                 return response
             if not self._is_transient_error(response.content):
@@ -224,7 +288,7 @@ class LLMProvider(ABC):
             await asyncio.sleep(delay)
 
         try:
-            return await self.chat(
+            response = await self.chat(
                 messages=messages,
                 tools=tools,
                 model=model,
@@ -232,13 +296,50 @@ class LLMProvider(ABC):
                 temperature=temperature,
                 reasoning_effort=reasoning_effort,
             )
+            logger.info(
+                "LLM response [{}] model={} attempt=final payload={}",
+                provider_name,
+                resolved_model,
+                self._to_log_json(
+                    {
+                        "finish_reason": response.finish_reason,
+                        "content": response.content,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "name": tc.name,
+                                "arguments": tc.arguments,
+                            }
+                            for tc in response.tool_calls
+                        ],
+                        "usage": response.usage,
+                        "reasoning_content": response.reasoning_content,
+                        "thinking_blocks": response.thinking_blocks,
+                    }
+                ),
+            )
+            return response
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return LLMResponse(
+            response = LLMResponse(
                 content=f"Error calling LLM: {exc}",
                 finish_reason="error",
             )
+            logger.info(
+                "LLM response [{}] model={} attempt=final payload={}",
+                provider_name,
+                resolved_model,
+                self._to_log_json(
+                    {
+                        "finish_reason": response.finish_reason,
+                        "content": response.content,
+                        "tool_calls": [],
+                        "usage": {},
+                    }
+                ),
+            )
+            return response
 
     @abstractmethod
     def get_default_model(self) -> str:
