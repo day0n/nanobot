@@ -42,12 +42,16 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         provider=provider,
         workspace=cfg.workspace_path,
         model=cfg.agents.defaults.model,
-        temperature=cfg.agents.defaults.temperature,
-        max_tokens=cfg.agents.defaults.max_tokens,
         max_iterations=cfg.agents.defaults.max_tool_iterations,
-        memory_window=cfg.agents.defaults.memory_window,
-        reasoning_effort=cfg.agents.defaults.reasoning_effort,
+        context_window_tokens=cfg.agents.defaults.context_window_tokens,
+        brave_api_key=cfg.tools.web.search.api_key or None,
+        web_search_provider=cfg.tools.web.search.provider,
+        web_search_max_results=cfg.tools.web.search.max_results,
         web_proxy=cfg.tools.web.proxy or None,
+        exec_config=cfg.tools.exec,
+        restrict_to_workspace=cfg.tools.restrict_to_workspace,
+        mcp_servers=cfg.tools.mcp_servers,
+        channels_config=cfg.channels,
     )
     app.state.agent = agent
 
