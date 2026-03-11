@@ -326,7 +326,8 @@ class ApiServerConfig(Base):
 class WebSearchConfig(Base):
     """Web search tool configuration."""
 
-    api_key: str = ""  # Brave Search API key
+    provider: Literal["brave", "tavily"] = "brave"
+    api_key: str = ""  # Search API key for selected provider
     max_results: int = 5
 
 
