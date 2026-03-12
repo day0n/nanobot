@@ -1,7 +1,6 @@
 ---
 name: create-workflow
 description: 创建并保存 OpenCreator 工作流
-always: false
 ---
 
 # 创建 OpenCreator 工作流
