@@ -312,7 +312,7 @@ class LiteLLMProvider(LLMProvider):
             tool_calls.append(ToolCallRequest(
                 id=_short_tool_id(),
                 name=tc.function.name,
-                arguments=args,
+                arguments=args, # type: ignore
             ))
 
         usage = {}

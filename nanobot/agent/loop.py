@@ -168,7 +168,7 @@ class AgentLoop:
         for name in ("message", "spawn", "cron"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else [])) # type: ignore
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:

@@ -150,20 +150,20 @@ class Tool(ABC):
             if "maximum" in schema and val > schema["maximum"]:
                 errors.append(f"{label} must be <= {schema['maximum']}")
         if t == "string":
-            if "minLength" in schema and len(val) < schema["minLength"]:
+            if "minLength" in schema and len(val) < schema["minLength"]: # type: ignore
                 errors.append(f"{label} must be at least {schema['minLength']} chars")
-            if "maxLength" in schema and len(val) > schema["maxLength"]:
+            if "maxLength" in schema and len(val) > schema["maxLength"]: # pyright: ignore[reportArgumentType]
                 errors.append(f"{label} must be at most {schema['maxLength']} chars")
         if t == "object":
             props = schema.get("properties", {})
             for k in schema.get("required", []):
                 if k not in val:
                     errors.append(f"missing required {path + '.' + k if path else k}")
-            for k, v in val.items():
+            for k, v in val.items(): # type: ignore
                 if k in props:
                     errors.extend(self._validate(v, props[k], path + "." + k if path else k))
         if t == "array" and "items" in schema:
-            for i, item in enumerate(val):
+            for i, item in enumerate(val): # type: ignore
                 errors.extend(
                     self._validate(item, schema["items"], f"{path}[{i}]" if path else f"[{i}]")
                 )
