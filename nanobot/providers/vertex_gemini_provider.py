@@ -235,6 +235,7 @@ class VertexGeminiProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 1.0,
         reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         from google.genai.types import GenerateContentConfig
 
