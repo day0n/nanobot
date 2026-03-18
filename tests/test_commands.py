@@ -70,8 +70,9 @@ def test_onboard_fresh_install(mock_paths):
     assert "Created workspace" in result.stdout
     assert "nanobot is ready" in result.stdout
     assert config_file.exists()
-    assert (workspace_dir / "AGENTS.md").exists()
-    assert (workspace_dir / "memory" / "MEMORY.md").exists()
+    assert workspace_dir.exists()
+    assert not (workspace_dir / "AGENTS.md").exists()
+    assert not (workspace_dir / "memory" / "MEMORY.md").exists()
     expected_workspace = Config().workspace_path
     assert mock_ws.call_args.args == (expected_workspace,)
 
@@ -87,7 +88,6 @@ def test_onboard_existing_config_refresh(mock_paths):
     assert "Config already exists" in result.stdout
     assert "existing values preserved" in result.stdout
     assert workspace_dir.exists()
-    assert (workspace_dir / "AGENTS.md").exists()
 
 
 def test_onboard_existing_config_overwrite(mock_paths):
@@ -104,7 +104,7 @@ def test_onboard_existing_config_overwrite(mock_paths):
 
 
 def test_onboard_existing_workspace_safe_create(mock_paths):
-    """Workspace exists — should not recreate, but still add missing templates."""
+    """Workspace exists — should not recreate runtime root."""
     config_file, workspace_dir, _ = mock_paths
     workspace_dir.mkdir(parents=True)
     config_file.write_text("{}")
@@ -113,8 +113,6 @@ def test_onboard_existing_workspace_safe_create(mock_paths):
 
     assert result.exit_code == 0
     assert "Created workspace" not in result.stdout
-    assert "Created AGENTS.md" in result.stdout
-    assert (workspace_dir / "AGENTS.md").exists()
 
 
 def test_onboard_help_shows_workspace_and_config_options():
@@ -143,7 +141,6 @@ def test_onboard_uses_explicit_config_and_workspace_paths(tmp_path, monkeypatch)
     assert result.exit_code == 0
     saved = Config.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
     assert saved.workspace_path == workspace_path
-    assert (workspace_path / "AGENTS.md").exists()
     stripped_output = _strip_ansi(result.stdout)
     compact_output = stripped_output.replace("\n", "")
     resolved_config = str(config_path.resolve())
@@ -279,7 +276,6 @@ def mock_agent_runtime(tmp_path):
 
     with patch("nanobot.config.loader.load_config", return_value=config) as mock_load_config, \
          patch("nanobot.config.paths.get_cron_dir", return_value=cron_dir), \
-         patch("nanobot.cli.commands.sync_workspace_templates") as mock_sync_templates, \
          patch("nanobot.cli.commands._make_provider", return_value=object()), \
          patch("nanobot.cli.commands._print_agent_response") as mock_print_response, \
          patch("nanobot.bus.queue.MessageBus"), \
@@ -295,7 +291,6 @@ def mock_agent_runtime(tmp_path):
         yield {
             "config": config,
             "load_config": mock_load_config,
-            "sync_templates": mock_sync_templates,
             "agent_loop_cls": mock_agent_loop_cls,
             "agent_loop": agent_loop,
             "print_response": mock_print_response,
@@ -318,9 +313,6 @@ def test_agent_uses_default_config_when_no_workspace_or_config_flags(mock_agent_
 
     assert result.exit_code == 0
     assert mock_agent_runtime["load_config"].call_args.args == (None,)
-    assert mock_agent_runtime["sync_templates"].call_args.args == (
-        mock_agent_runtime["config"].workspace_path,
-    )
     assert mock_agent_runtime["agent_loop_cls"].call_args.kwargs["workspace"] == (
         mock_agent_runtime["config"].workspace_path
     )
@@ -352,7 +344,6 @@ def test_agent_config_sets_active_path(monkeypatch, tmp_path: Path) -> None:
     )
     monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
     monkeypatch.setattr("nanobot.config.paths.get_cron_dir", lambda: config_file.parent / "cron")
-    monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr("nanobot.cli.commands._make_provider", lambda _config: object())
     monkeypatch.setattr("nanobot.bus.queue.MessageBus", lambda: object())
     monkeypatch.setattr("nanobot.cron.service.CronService", lambda _store: object())
@@ -383,7 +374,6 @@ def test_agent_overrides_workspace_path(mock_agent_runtime):
 
     assert result.exit_code == 0
     assert mock_agent_runtime["config"].agents.defaults.workspace == str(workspace_path)
-    assert mock_agent_runtime["sync_templates"].call_args.args == (workspace_path,)
     assert mock_agent_runtime["agent_loop_cls"].call_args.kwargs["workspace"] == workspace_path
 
 
@@ -400,18 +390,7 @@ def test_agent_workspace_override_wins_over_config_workspace(mock_agent_runtime,
     assert result.exit_code == 0
     assert mock_agent_runtime["load_config"].call_args.args == (config_path.resolve(),)
     assert mock_agent_runtime["config"].agents.defaults.workspace == str(workspace_path)
-    assert mock_agent_runtime["sync_templates"].call_args.args == (workspace_path,)
     assert mock_agent_runtime["agent_loop_cls"].call_args.kwargs["workspace"] == workspace_path
-
-
-def test_agent_warns_about_deprecated_memory_window(mock_agent_runtime):
-    mock_agent_runtime["config"].agents.defaults.memory_window = 100
-
-    result = runner.invoke(app, ["agent", "-m", "hello"])
-
-    assert result.exit_code == 0
-    assert "memoryWindow" in result.stdout
-    assert "contextWindowTokens" in result.stdout
 
 
 def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Path) -> None:
@@ -429,10 +408,6 @@ def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Pa
     )
     monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
     monkeypatch.setattr(
-        "nanobot.cli.commands.sync_workspace_templates",
-        lambda path: seen.__setitem__("workspace", path),
-    )
-    monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
         lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
     )
@@ -441,7 +416,6 @@ def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Pa
 
     assert isinstance(result.exception, _StopGateway)
     assert seen["config_path"] == config_file.resolve()
-    assert seen["workspace"] == Path(config.agents.defaults.workspace)
 
 
 def test_gateway_workspace_option_overrides_config(monkeypatch, tmp_path: Path) -> None:
@@ -457,10 +431,6 @@ def test_gateway_workspace_option_overrides_config(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr("nanobot.config.loader.set_config_path", lambda _path: None)
     monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
     monkeypatch.setattr(
-        "nanobot.cli.commands.sync_workspace_templates",
-        lambda path: seen.__setitem__("workspace", path),
-    )
-    monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
         lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
     )
@@ -471,31 +441,7 @@ def test_gateway_workspace_option_overrides_config(monkeypatch, tmp_path: Path) 
     )
 
     assert isinstance(result.exception, _StopGateway)
-    assert seen["workspace"] == override
     assert config.workspace_path == override
-
-
-def test_gateway_warns_about_deprecated_memory_window(monkeypatch, tmp_path: Path) -> None:
-    config_file = tmp_path / "instance" / "config.json"
-    config_file.parent.mkdir(parents=True)
-    config_file.write_text("{}")
-
-    config = Config()
-    config.agents.defaults.memory_window = 100
-
-    monkeypatch.setattr("nanobot.config.loader.set_config_path", lambda _path: None)
-    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
-    monkeypatch.setattr(
-        "nanobot.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
-    )
-
-    result = runner.invoke(app, ["gateway", "--config", str(config_file)])
-
-    assert isinstance(result.exception, _StopGateway)
-    assert "memoryWindow" in result.stdout
-    assert "contextWindowTokens" in result.stdout
 
 def test_gateway_uses_config_directory_for_cron_store(monkeypatch, tmp_path: Path) -> None:
     config_file = tmp_path / "instance" / "config.json"
@@ -509,7 +455,6 @@ def test_gateway_uses_config_directory_for_cron_store(monkeypatch, tmp_path: Pat
     monkeypatch.setattr("nanobot.config.loader.set_config_path", lambda _path: None)
     monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
     monkeypatch.setattr("nanobot.config.paths.get_cron_dir", lambda: config_file.parent / "cron")
-    monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr("nanobot.cli.commands._make_provider", lambda _config: object())
     monkeypatch.setattr("nanobot.bus.queue.MessageBus", lambda: object())
     monkeypatch.setattr("nanobot.session.manager.SessionManager", lambda _workspace: object())
@@ -537,7 +482,6 @@ def test_gateway_uses_configured_port_when_cli_flag_is_missing(monkeypatch, tmp_
 
     monkeypatch.setattr("nanobot.config.loader.set_config_path", lambda _path: None)
     monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
         lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
@@ -559,7 +503,6 @@ def test_gateway_cli_port_overrides_configured_port(monkeypatch, tmp_path: Path)
 
     monkeypatch.setattr("nanobot.config.loader.set_config_path", lambda _path: None)
     monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
         lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),

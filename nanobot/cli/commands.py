@@ -35,7 +35,6 @@ from rich.text import Text
 from nanobot import __logo__, __version__
 from nanobot.config.paths import get_workspace_path
 from nanobot.config.schema import Config
-from nanobot.utils.helpers import sync_workspace_templates
 
 app = typer.Typer(
     name="nanobot",
@@ -299,8 +298,6 @@ def onboard(
         config = _apply_workspace_override(Config())
         save_config(config, config_path)
         console.print(f"[green]✓[/green] Created config at {config_path}")
-    console.print("[dim]Config template now uses `maxTokens` + `contextWindowTokens`; `memoryWindow` is no longer a runtime setting.[/dim]")
-
     _onboard_plugins(config_path)
 
     # Create workspace, preferring the configured workspace path.
@@ -308,8 +305,6 @@ def onboard(
     if not workspace.exists():
         workspace.mkdir(parents=True, exist_ok=True)
         console.print(f"[green]✓[/green] Created workspace at {workspace}")
-
-    sync_workspace_templates(workspace)
 
     agent_cmd = 'nanobot agent -m "Hello!"'
     if config:
@@ -449,17 +444,6 @@ def _load_runtime_config(config: str | None = None, workspace: str | None = None
         loaded.agents.defaults.workspace = workspace
     return loaded
 
-
-def _print_deprecated_memory_window_notice(config: Config) -> None:
-    """Warn when running with old memoryWindow-only config."""
-    if config.agents.defaults.should_warn_deprecated_memory_window:
-        console.print(
-            "[yellow]Hint:[/yellow] Detected deprecated `memoryWindow` without "
-            "`contextWindowTokens`. `memoryWindow` is ignored; run "
-            "[cyan]nanobot onboard[/cyan] to refresh your config template."
-        )
-
-
 # ============================================================================
 # Gateway / Server
 # ============================================================================
@@ -487,11 +471,9 @@ def gateway(
         logging.basicConfig(level=logging.DEBUG)
 
     config = _load_runtime_config(config, workspace)
-    _print_deprecated_memory_window_notice(config)
     port = port if port is not None else config.gateway.port
 
     console.print(f"{__logo__} Starting nanobot gateway version {__version__} on port {port}...")
-    sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
@@ -704,8 +686,6 @@ def agent(
     from nanobot.cron.service import CronService
 
     config = _load_runtime_config(config, workspace)
-    _print_deprecated_memory_window_notice(config)
-    sync_workspace_templates(config.workspace_path)
 
     bus = MessageBus()
     provider = _make_provider(config)

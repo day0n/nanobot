@@ -8,7 +8,6 @@ from typing import Any
 
 from nanobot.utils.helpers import current_time_str
 
-from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.utils.helpers import build_assistant_message, detect_image_mime
 
@@ -21,20 +20,15 @@ class ContextBuilder:
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.memory = MemoryStore(workspace)
-        self.skills = SkillsLoader(workspace)
+        self.skills = SkillsLoader()
 
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
+        """Build the system prompt from identity, bootstrap files, and skills."""
         parts = [self._get_identity()]
 
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
-
-        memory = self.memory.get_memory_context()
-        if memory:
-            parts.append(f"# Memory\n\n{memory}")
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
@@ -81,9 +75,7 @@ You are OpenCreator Agent, a helpful AI assistant.
 
 ## Workspace
 Your workspace is at: {workspace_path}
-- Long-term memory: {workspace_path}/memory/MEMORY.md (write important facts here)
-- History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
-- Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
+This is your runtime directory for file operations and session storage.
 
 {platform_policy}
 
@@ -106,29 +98,23 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _load_bootstrap_files(self) -> str:
-        """Load bootstrap files, preferring workspace overrides over bundled templates."""
+        """Load bootstrap files from built-in prompt directory (read-only, no workspace override)."""
         from importlib.resources import files as pkg_files
 
         parts = []
-        templates_dir = None
-
         try:
-            templates_dir = pkg_files("nanobot") / "templates"
+            prompt_dir = pkg_files("nanobot") / "prompt"
         except Exception:
-            templates_dir = None
+            prompt_dir = None
+
+        if not prompt_dir or not prompt_dir.is_dir():
+            return ""
 
         for filename in self.BOOTSTRAP_FILES:
-            file_path = self.workspace / filename
-            if file_path.exists():
-                content = file_path.read_text(encoding="utf-8")
+            prompt_file = prompt_dir / filename
+            if prompt_file.is_file():
+                content = prompt_file.read_text(encoding="utf-8")
                 parts.append(f"## {filename}\n\n{content}")
-                continue
-
-            if templates_dir and templates_dir.is_dir():
-                template_file = templates_dir / filename
-                if template_file.is_file():
-                    content = template_file.read_text(encoding="utf-8")
-                    parts.append(f"## {filename}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
 

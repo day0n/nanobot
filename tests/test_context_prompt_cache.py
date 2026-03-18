@@ -24,8 +24,8 @@ def _make_workspace(tmp_path: Path) -> Path:
     return workspace
 
 
-def test_bootstrap_files_are_backed_by_templates() -> None:
-    template_dir = pkg_files("nanobot") / "templates"
+def test_bootstrap_files_are_backed_by_prompt_assets() -> None:
+    template_dir = pkg_files("nanobot") / "prompt"
 
     for filename in ContextBuilder.BOOTSTRAP_FILES:
         assert (template_dir / filename).is_file(), f"missing bootstrap template: {filename}"

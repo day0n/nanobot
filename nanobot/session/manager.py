@@ -21,8 +21,6 @@ class Session:
     Stores messages in JSONL format for easy reading and persistence.
 
     Important: Messages are append-only for LLM cache efficiency.
-    The consolidation process writes summaries to MEMORY.md/HISTORY.md
-    but does NOT modify the messages list or get_history() output.
     """
 
     key: str  # channel:chat_id
@@ -30,7 +28,6 @@ class Session:
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
-    last_consolidated: int = 0  # Number of messages already consolidated to files
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
@@ -67,9 +64,8 @@ class Session:
         return start
 
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
-        """Return unconsolidated messages for LLM input, aligned to a legal tool-call boundary."""
-        unconsolidated = self.messages[self.last_consolidated:]
-        sliced = unconsolidated[-max_messages:]
+        """Return messages for LLM input, aligned to a legal tool-call boundary."""
+        sliced = self.messages[-max_messages:] if max_messages > 0 else list(self.messages)
 
         # Drop leading non-user messages to avoid starting mid-turn when possible.
         for i, message in enumerate(sliced):
@@ -95,7 +91,6 @@ class Session:
     def clear(self) -> None:
         """Clear all messages and reset session to initial state."""
         self.messages = []
-        self.last_consolidated = 0
         self.updated_at = datetime.now()
 
 
@@ -103,7 +98,8 @@ class SessionManager:
     """
     Manages conversation sessions.
 
-    Sessions are stored as JSONL files in the sessions directory.
+    Sessions are stored as JSONL files organized by user_id:
+    sessions/<user_id>/<session_id>.jsonl
     """
 
     def __init__(self, workspace: Path):
@@ -112,15 +108,54 @@ class SessionManager:
         self.legacy_sessions_dir = get_legacy_sessions_dir()
         self._cache: dict[str, Session] = {}
 
+    @staticmethod
+    def _extract_user_id(key: str) -> str:
+        """Extract user_id from session key for directory isolation.
+
+        Key formats:
+          api:{user_id}:{session_id}  → user_id
+          telegram:{user_id}          → user_id
+          discord:{user_id}           → user_id
+          cli:direct                  → _local
+          cron:{job_id}               → _system
+          heartbeat                   → _system
+          other                       → _default
+        """
+        if not key or ":" not in key:
+            return "_system" if key == "heartbeat" else "_default"
+
+        parts = key.split(":", 2)
+        channel = parts[0]
+
+        if channel == "api" and len(parts) >= 3:
+            return parts[1]  # api:{user_id}:{session_id}
+        if channel in ("telegram", "discord") and len(parts) >= 2:
+            return parts[1]
+        if channel == "cli":
+            return "_local"
+        if channel == "cron":
+            return "_system"
+
+        # Fallback: use second segment as user_id
+        return parts[1] if len(parts) >= 2 else "_default"
+
     def _get_session_path(self, key: str) -> Path:
-        """Get the file path for a session."""
+        """Get the file path for a session, organized by user_id."""
+        user_id = self._extract_user_id(key)
+        safe_user = safe_filename(user_id)
         safe_key = safe_filename(key.replace(":", "_"))
-        return self.sessions_dir / f"{safe_key}.jsonl"
+        user_dir = ensure_dir(self.sessions_dir / safe_user)
+        return user_dir / f"{safe_key}.jsonl"
 
     def _get_legacy_session_path(self, key: str) -> Path:
         """Legacy global session path (~/.nanobot/sessions/)."""
         safe_key = safe_filename(key.replace(":", "_"))
         return self.legacy_sessions_dir / f"{safe_key}.jsonl"
+
+    def _get_flat_session_path(self, key: str) -> Path:
+        """Old flat session path (workspace/sessions/{key}.jsonl) for migration."""
+        safe_key = safe_filename(key.replace(":", "_"))
+        return self.sessions_dir / f"{safe_key}.jsonl"
 
     def get_or_create(self, key: str) -> Session:
         """
@@ -143,12 +178,25 @@ class SessionManager:
         return session
 
     def _load(self, key: str) -> Session | None:
-        """Load a session from disk."""
+        """Load a session from disk, migrating from legacy/flat paths if needed."""
         path = self._get_session_path(key)
         if not path.exists():
+            # Try flat session path (pre-user_id migration)
+            flat_path = self._get_flat_session_path(key)
+            if flat_path.exists() and flat_path != path:
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(flat_path), str(path))
+                    logger.info("Migrated session {} from flat to user_id path", key)
+                except Exception:
+                    logger.exception("Failed to migrate session {} from flat path", key)
+
+        if not path.exists():
+            # Try legacy global path (~/.nanobot/sessions/)
             legacy_path = self._get_legacy_session_path(key)
             if legacy_path.exists():
                 try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(legacy_path), str(path))
                     logger.info("Migrated session {} from legacy path", key)
                 except Exception:
@@ -161,7 +209,6 @@ class SessionManager:
             messages = []
             metadata = {}
             created_at = None
-            last_consolidated = 0
 
             with open(path, encoding="utf-8") as f:
                 for line in f:
@@ -174,7 +221,6 @@ class SessionManager:
                     if data.get("_type") == "metadata":
                         metadata = data.get("metadata", {})
                         created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
-                        last_consolidated = data.get("last_consolidated", 0)
                     else:
                         messages.append(data)
 
@@ -183,7 +229,6 @@ class SessionManager:
                 messages=messages,
                 created_at=created_at or datetime.now(),
                 metadata=metadata,
-                last_consolidated=last_consolidated
             )
         except Exception as e:
             logger.warning("Failed to load session {}: {}", key, e)
@@ -200,7 +245,6 @@ class SessionManager:
                 "created_at": session.created_at.isoformat(),
                 "updated_at": session.updated_at.isoformat(),
                 "metadata": session.metadata,
-                "last_consolidated": session.last_consolidated
             }
             f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
             for msg in session.messages:
@@ -214,16 +258,15 @@ class SessionManager:
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """
-        List all sessions.
+        List all sessions across all user_id directories.
 
         Returns:
             List of session info dicts.
         """
         sessions = []
 
-        for path in self.sessions_dir.glob("*.jsonl"):
+        for path in self.sessions_dir.glob("*/*.jsonl"):
             try:
-                # Read just the metadata line
                 with open(path, encoding="utf-8") as f:
                     first_line = f.readline().strip()
                     if first_line:
@@ -234,7 +277,8 @@ class SessionManager:
                                 "key": key,
                                 "created_at": data.get("created_at"),
                                 "updated_at": data.get("updated_at"),
-                                "path": str(path)
+                                "path": str(path),
+                                "user_id": path.parent.name,
                             })
             except Exception:
                 continue
