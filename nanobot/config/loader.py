@@ -1,6 +1,7 @@
 """Configuration loading utilities."""
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 from nanobot.config.schema import Config
@@ -40,7 +41,15 @@ def load_config(config_path: Path | None = None) -> Config:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             data = _migrate_config(data)
-            return Config.model_validate(data)
+            # Normalize persisted config keys (camelCase aliases) before merging
+            # environment overrides, otherwise both alias/name forms can coexist
+            # and file values may override env unexpectedly.
+            data = Config.model_validate(data).model_dump()
+            # Load env-backed settings separately and overlay only explicitly provided
+            # environment values on top of the persisted config file.
+            env_overrides = Config().model_dump(exclude_unset=True)
+            merged = _deep_merge(data, env_overrides)
+            return Config.model_validate(merged)
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Warning: Failed to load config from {path}: {e}")
             print("Using default configuration.")
@@ -73,3 +82,14 @@ def _migrate_config(data: dict) -> dict:
     if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in tools:
         tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
     return data
+
+
+def _deep_merge(base: dict, overrides: dict) -> dict:
+    """Recursively merge overrides into base without mutating inputs."""
+    result = deepcopy(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = deepcopy(value)
+    return result
