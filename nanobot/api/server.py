@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 @dataclass(slots=True)
 class AuthenticatedAgentUser:
     user_id: str
+    token: str
 
 
 class ChatRequest(BaseModel):
@@ -69,7 +70,7 @@ def _authenticate_agent_request(
     if not isinstance(user_id, str) or not user_id.strip():
         raise HTTPException(status_code=401, detail="Token missing subject")
 
-    return AuthenticatedAgentUser(user_id=user_id)
+    return AuthenticatedAgentUser(user_id=user_id, token=token)
 
 
 def create_app(config: Config, provider: LLMProvider) -> FastAPI:
@@ -110,6 +111,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     async def chat(
         body: ChatRequest,
         authorization: str | None = Header(default=None),
+        x_time_zone: str | None = Header(default=None, alias="X-Time-Zone"),
     ):
         auth_user = _authenticate_agent_request(authorization, cfg)
         flow_id = body.flow_id.strip() if isinstance(body.flow_id, str) and body.flow_id.strip() else None
@@ -119,6 +121,12 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             else f"api:{auth_user.user_id}:{body.session_id}"
         )
         metadata = {"flow_id": flow_id} if flow_id else None
+        private_context = {
+            "auth_token": auth_user.token,
+            "flow_id": flow_id,
+            "time_zone": x_time_zone.strip() if isinstance(x_time_zone, str) and x_time_zone.strip() else None,
+            "user_id": auth_user.user_id,
+        }
 
         async def event_stream():
             queue: asyncio.Queue = asyncio.Queue()
@@ -136,6 +144,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                         chat_id=auth_user.user_id,
                         on_progress=on_progress,
                         metadata=metadata,
+                        private_context=private_context,
                     )
                     await queue.put({"type": "done", "content": result or ""})
                 except Exception as e:

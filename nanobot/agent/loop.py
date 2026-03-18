@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.request_context import reset_request_context, set_request_context
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
@@ -356,113 +357,118 @@ class AgentLoop:
         msg: InboundMessage,
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        private_context: dict[str, Any] | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
+        request_ctx_token = set_request_context(private_context)
         # System messages: parse origin from chat_id ("channel:chat_id")
-        if msg.channel == "system":
-            channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
-                                else ("cli", msg.chat_id))
-            logger.info("Processing system message from {}", msg.sender_id)
-            key = f"{channel}:{chat_id}"
-            session = self.sessions.get_or_create(key)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-            history = session.get_history(max_messages=0)
-            # Subagent results should be assistant role, other system messages use user role
-            current_role = "assistant" if msg.sender_id == "subagent" else "user"
-            messages = self.context.build_messages(
-                history=history,
-                current_message=msg.content, channel=channel, chat_id=chat_id,
-                metadata=msg.metadata,
-                current_role=current_role,
+        try:
+            if msg.channel == "system":
+                channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
+                                    else ("cli", msg.chat_id))
+                logger.info("Processing system message from {}", msg.sender_id)
+                key = f"{channel}:{chat_id}"
+                session = self.sessions.get_or_create(key)
+                self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+                history = session.get_history(max_messages=0)
+                # Subagent results should be assistant role, other system messages use user role
+                current_role = "assistant" if msg.sender_id == "subagent" else "user"
+                messages = self.context.build_messages(
+                    history=history,
+                    current_message=msg.content, channel=channel, chat_id=chat_id,
+                    metadata=msg.metadata,
+                    current_role=current_role,
+                )
+                final_content, _, all_msgs = await self._run_agent_loop(messages)
+                self._save_turn(session, all_msgs, 1 + len(history))
+                self.sessions.save(session)
+                return OutboundMessage(channel=channel, chat_id=chat_id,
+                                      content=final_content or "Background task completed.")
+
+            preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
+            logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
+            logger.info(
+                "Inbound message payload channel={} sender_id={} session_key={} content={}",
+                msg.channel,
+                msg.sender_id,
+                session_key or msg.session_key,
+                msg.content,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
+
+            key = session_key or msg.session_key
+            session = self.sessions.get_or_create(key)
+
+            # Slash commands
+            cmd = msg.content.strip().lower()
+            if cmd == "/new":
+                session.clear()
+                self.sessions.save(session)
+                self.sessions.invalidate(session.key)
+
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                      content="New session started.")
+            if cmd == "/help":
+                lines = [
+                    "🐈 nanobot commands:",
+                    "/new — Start a new conversation",
+                    "/stop — Stop the current task",
+                    "/restart — Restart the bot",
+                    "/help — Show available commands",
+                ]
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
+                )
+
+            self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+            if message_tool := self.tools.get("message"):
+                if isinstance(message_tool, MessageTool):
+                    message_tool.start_turn()
+
+            history = session.get_history(max_messages=0)
+            initial_messages = self.context.build_messages(
+                history=history,
+                current_message=msg.content,
+                media=msg.media if msg.media else None,
+                channel=msg.channel, chat_id=msg.chat_id,
+                metadata=msg.metadata,
+            )
+
+            async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+                meta = dict(msg.metadata or {})
+                meta["_progress"] = True
+                meta["_tool_hint"] = tool_hint
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
+                ))
+
+            final_content, _, all_msgs = await self._run_agent_loop(
+                initial_messages, on_progress=on_progress or _bus_progress,
+            )
+
+            if final_content is None:
+                final_content = "I've completed processing but have no response to give."
+
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
-            return OutboundMessage(channel=channel, chat_id=chat_id,
-                                  content=final_content or "Background task completed.")
 
-        preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
-        logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
-        logger.info(
-            "Inbound message payload channel={} sender_id={} session_key={} content={}",
-            msg.channel,
-            msg.sender_id,
-            session_key or msg.session_key,
-            msg.content,
-        )
+            if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+                return None
 
-        key = session_key or msg.session_key
-        session = self.sessions.get_or_create(key)
-
-        # Slash commands
-        cmd = msg.content.strip().lower()
-        if cmd == "/new":
-            session.clear()
-            self.sessions.save(session)
-            self.sessions.invalidate(session.key)
-
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="New session started.")
-        if cmd == "/help":
-            lines = [
-                "🐈 nanobot commands:",
-                "/new — Start a new conversation",
-                "/stop — Stop the current task",
-                "/restart — Restart the bot",
-                "/help — Show available commands",
-            ]
-            return OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
+            preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
+            logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+            logger.info(
+                "Outbound message payload channel={} sender_id={} session_key={} content={}",
+                msg.channel,
+                msg.sender_id,
+                key,
+                final_content,
             )
-
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
-        if message_tool := self.tools.get("message"):
-            if isinstance(message_tool, MessageTool):
-                message_tool.start_turn()
-
-        history = session.get_history(max_messages=0)
-        initial_messages = self.context.build_messages(
-            history=history,
-            current_message=msg.content,
-            media=msg.media if msg.media else None,
-            channel=msg.channel, chat_id=msg.chat_id,
-            metadata=msg.metadata,
-        )
-
-        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
-            meta = dict(msg.metadata or {})
-            meta["_progress"] = True
-            meta["_tool_hint"] = tool_hint
-            await self.bus.publish_outbound(OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
-            ))
-
-        final_content, _, all_msgs = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
-        )
-
-        if final_content is None:
-            final_content = "I've completed processing but have no response to give."
-
-        self._save_turn(session, all_msgs, 1 + len(history))
-        self.sessions.save(session)
-
-        if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
-            return None
-
-        preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
-        logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
-        logger.info(
-            "Outbound message payload channel={} sender_id={} session_key={} content={}",
-            msg.channel,
-            msg.sender_id,
-            key,
-            final_content,
-        )
-        return OutboundMessage(
-            channel=msg.channel, chat_id=msg.chat_id, content=final_content,
-            metadata=msg.metadata or {},
-        )
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=final_content,
+                metadata=msg.metadata or {},
+            )
+        finally:
+            reset_request_context(request_ctx_token)
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """Save new-turn messages into session, truncating large tool results."""
@@ -509,6 +515,7 @@ class AgentLoop:
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         metadata: dict[str, Any] | None = None,
+        private_context: dict[str, Any] | None = None,
     ) -> str:
         """Process a message directly (for CLI or cron usage)."""
         await self._connect_mcp()
@@ -519,5 +526,10 @@ class AgentLoop:
             content=content,
             metadata=metadata or {},
         )
-        response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
+        response = await self._process_message(
+            msg,
+            session_key=session_key,
+            on_progress=on_progress,
+            private_context=private_context,
+        )
         return response.content if response else ""
