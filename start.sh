@@ -5,8 +5,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${NANOBOT_PORT:-18791}"
 LOG_FILE="/tmp/nanobot.log"
 UV="$HOME/.local/bin/uv"
+ENV_FILE="$SCRIPT_DIR/.env.local"
 
 cd "$SCRIPT_DIR"
+
+if [ -f "$ENV_FILE" ]; then
+    echo "[0/4] 加载环境变量: $ENV_FILE"
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+fi
 
 echo "[1/4] git pull..."
 git pull

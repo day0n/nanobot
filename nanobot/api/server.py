@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import jwt
 from fastapi import FastAPI
+from fastapi import Header
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from loguru import logger
@@ -20,9 +24,54 @@ if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
 
 
+@dataclass(slots=True)
+class AuthenticatedAgentUser:
+    user_id: str
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
+
+
+def _authenticate_agent_request(
+    authorization: str | None,
+    config: "Config",
+) -> AuthenticatedAgentUser:
+    """Authenticate API chat requests with the publisher-issued user JWT.
+
+    When no Clerk PEM public key is configured, auth is disabled for local/dev usage.
+    """
+    if not config.api.clerk_pem_public_key:
+        return AuthenticatedAgentUser(user_id="api_user")
+
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header is required")
+
+    bearer_prefix = "Bearer "
+    if not authorization.startswith(bearer_prefix):
+        raise HTTPException(status_code=401, detail="Authorization header must use Bearer token")
+
+    token = authorization[len(bearer_prefix):].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Bearer token is required")
+
+    try:
+        payload = jwt.decode(
+            token,
+            config.api.clerk_pem_public_key,
+            algorithms=["RS256"],
+        )
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(status_code=401, detail="Token has expired") from exc
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+
+    user_id = payload.get("sub")
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise HTTPException(status_code=401, detail="Token missing subject")
+
+    return AuthenticatedAgentUser(user_id=user_id)
 
 
 def create_app(config: Config, provider: LLMProvider) -> FastAPI:
@@ -60,8 +109,12 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         app.state.agent.stop()
 
     @app.post("/v1/agent/chat")
-    async def chat(body: ChatRequest):
-        session_key = f"api:{body.session_id}"
+    async def chat(
+        body: ChatRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        auth_user = _authenticate_agent_request(authorization, cfg)
+        session_key = f"api:{auth_user.user_id}:{body.session_id}"
 
         async def event_stream():
             queue: asyncio.Queue = asyncio.Queue()
@@ -76,7 +129,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                         body.message,
                         session_key=session_key,
                         channel="api",
-                        chat_id="api_user",
+                        chat_id=auth_user.user_id,
                         on_progress=on_progress,
                     )
                     await queue.put({"type": "done", "content": result or ""})
