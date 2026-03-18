@@ -111,5 +111,5 @@
 1. 目标：一句话复述  
 2. 推荐链路：快速版 + 增强版  
 3. 节点说明：每个节点一句话  
-4. 最小改造补丁：`add/remove/reconnect/update_model`  
+4. 最小改造补丁：`add_node/remove_node/reconnect/update_model`  
 5. 操作提醒：避免连线类型错误、缺失必填输入、超连接上限

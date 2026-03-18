@@ -18,7 +18,6 @@ The skill format and metadata structure follow OpenClaw's conventions to maintai
 | Skill | Description | Always Loaded |
 |-------|-------------|---------------|
 | `create-workflow` | Create OpenCreator workflows via API | ✅ Yes |
-| `memory` | Manage agent memory and context | ✅ Yes |
 | `workflow-user-guide` | User-facing OpenCreator workflow guidance (nodes, wiring, templates) | No |
 | `weather` | Get weather info using wttr.in and Open-Meteo | No |
 | `summarize` | Summarize URLs, files, and YouTube videos | No |
