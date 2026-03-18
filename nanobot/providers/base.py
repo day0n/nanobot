@@ -280,7 +280,6 @@ class LLMProvider(ABC):
             messages=messages, tools=tools, model=model,
             max_tokens=max_tokens, temperature=temperature,
             reasoning_effort=reasoning_effort, tool_choice=tool_choice,
->>>>>>> main
         )
 
         for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
