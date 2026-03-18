@@ -38,12 +38,9 @@ def _authenticate_agent_request(
     authorization: str | None,
     config: "Config",
 ) -> AuthenticatedAgentUser:
-    """Authenticate API chat requests with the publisher-issued user JWT.
-
-    When no Clerk PEM public key is configured, auth is disabled for local/dev usage.
-    """
+    """Authenticate API chat requests with the publisher-issued user JWT."""
     if not config.api.clerk_pem_public_key:
-        return AuthenticatedAgentUser(user_id="api_user")
+        raise HTTPException(status_code=401, detail="JWT auth is not configured on the server")
 
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header is required")
