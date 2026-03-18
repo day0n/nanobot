@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from copy import deepcopy
 from typing import Any
@@ -517,6 +518,21 @@ class CreateWorkflowTool(Tool):
         "required": ["user_email", "workflow_name", "nodes", "edges"],
     }
 
+    def __init__(
+        self,
+        api_base: str = "",
+        internal_api_key: str = "",
+        editor_base: str = _EDITOR_BASE,
+    ):
+        self.api_base = api_base.strip() or _API_BASE
+        self.internal_api_key = internal_api_key.strip()
+        self.editor_base = editor_base.rstrip("/") or _EDITOR_BASE
+
+    def _auth_header(self) -> str:
+        if not self.internal_api_key:
+            return _INTERNAL_AUTH
+        return base64.b64encode(self.internal_api_key.encode("utf-8")).decode("ascii")
+
     async def execute(self, *, user_email: str, workflow_name: str, nodes: list, edges: list, **_: Any) -> str:
         email = user_email.strip() if isinstance(user_email, str) else ""
         name = workflow_name.strip() if isinstance(workflow_name, str) else ""
@@ -547,10 +563,10 @@ class CreateWorkflowTool(Tool):
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
-                    f"{_API_BASE}/api/internal/workflow/create-by-email",
+                    f"{self.api_base.rstrip('/')}/api/internal/workflow/create-by-email",
                     headers={
                         "Content-Type": "application/json",
-                        "Authorization": _INTERNAL_AUTH,
+                        "Authorization": self._auth_header(),
                     },
                     content=json.dumps(payload, ensure_ascii=False),
                 )
@@ -574,8 +590,8 @@ class CreateWorkflowTool(Tool):
             return f"Workflow created but could not extract flow_id. Raw response: {resp.text[:300]}"
 
         # Frontend route is /canvas/{flow_id}. Some deployments use locale-prefixed routing.
-        editor_url = f"{_EDITOR_BASE}/canvas/{flow_id}"
-        editor_url_with_locale = f"{_EDITOR_BASE}/en/canvas/{flow_id}"
+        editor_url = f"{self.editor_base}/canvas/{flow_id}"
+        editor_url_with_locale = f"{self.editor_base}/en/canvas/{flow_id}"
 
         message = (
             f"Workflow created successfully!\n"

@@ -46,12 +46,18 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         context_window_tokens=cfg.agents.defaults.context_window_tokens,
         web_search_config=cfg.tools.web.search,
         web_proxy=cfg.tools.web.proxy or None,
+        api_config=cfg.api,
         exec_config=cfg.tools.exec,
         restrict_to_workspace=cfg.tools.restrict_to_workspace,
         mcp_servers=cfg.tools.mcp_servers,
         channels_config=cfg.channels,
     )
     app.state.agent = agent
+
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        await app.state.agent.close_mcp()
+        app.state.agent.stop()
 
     @app.post("/v1/agent/chat")
     async def chat(body: ChatRequest):

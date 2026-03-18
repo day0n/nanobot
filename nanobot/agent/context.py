@@ -106,40 +106,28 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _load_bootstrap_files(self) -> str:
-        """Load all bootstrap files from system templates (shared across all users).
-
-        TODO: 多用户 workspace 隔离
-        ========================
-        当前：所有用户共享系统模板 (nanobot/templates/*.md)
-        目标：每个用户独立 workspace，支持自定义配置
-
-        改造要点：
-        1. ContextBuilder 添加 user_id 参数
-        2. 创建用户级目录：~/.nanobot/workspaces/{user_id}/
-        3. 优先级：用户配置 > 系统模板
-        4. 添加用户认证层（channel:chat_id -> user_id 映射）
-        5. 相关文件：agent/loop.py, agent/memory.py, api/server.py
-        """
+        """Load bootstrap files, preferring workspace overrides over bundled templates."""
         from importlib.resources import files as pkg_files
 
         parts = []
+        templates_dir = None
 
         try:
             templates_dir = pkg_files("nanobot") / "templates"
-            if not templates_dir.is_dir():
-                return ""
+        except Exception:
+            templates_dir = None
 
-            for filename in self.BOOTSTRAP_FILES:
+        for filename in self.BOOTSTRAP_FILES:
+            file_path = self.workspace / filename
+            if file_path.exists():
+                content = file_path.read_text(encoding="utf-8")
+                parts.append(f"## {filename}\n\n{content}")
+                continue
+
+            if templates_dir and templates_dir.is_dir():
                 template_file = templates_dir / filename
                 if template_file.is_file():
                     content = template_file.read_text(encoding="utf-8")
-                    parts.append(f"## {filename}\n\n{content}")
-        except Exception:
-            # Fallback to workspace if templates not found
-            for filename in self.BOOTSTRAP_FILES:
-                file_path = self.workspace / filename
-                if file_path.exists():
-                    content = file_path.read_text(encoding="utf-8")
                     parts.append(f"## {filename}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
