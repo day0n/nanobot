@@ -32,6 +32,7 @@ class AuthenticatedAgentUser:
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
+    flow_id: str | None = None
 
 
 def _authenticate_agent_request(
@@ -111,7 +112,13 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         authorization: str | None = Header(default=None),
     ):
         auth_user = _authenticate_agent_request(authorization, cfg)
-        session_key = f"api:{auth_user.user_id}:{body.session_id}"
+        flow_id = body.flow_id.strip() if isinstance(body.flow_id, str) and body.flow_id.strip() else None
+        session_key = (
+            f"api:{auth_user.user_id}:flow:{flow_id}:{body.session_id}"
+            if flow_id
+            else f"api:{auth_user.user_id}:{body.session_id}"
+        )
+        metadata = {"flow_id": flow_id} if flow_id else None
 
         async def event_stream():
             queue: asyncio.Queue = asyncio.Queue()
@@ -128,6 +135,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                         channel="api",
                         chat_id=auth_user.user_id,
                         on_progress=on_progress,
+                        metadata=metadata,
                     )
                     await queue.put({"type": "done", "content": result or ""})
                 except Exception as e:

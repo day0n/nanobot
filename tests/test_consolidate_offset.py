@@ -67,6 +67,19 @@ class TestUserScopedStorage:
 
         assert (tmp_path / "sessions" / "user-123" / "api_user-123_thread-1.jsonl").exists()
 
+    def test_api_flow_sessions_are_saved_under_user_directory(self, tmp_path) -> None:
+        manager = SessionManager(Path(tmp_path))
+        session = create_session_with_messages("api:user-123:flow:flow-456:thread-1", 3)
+
+        manager.save(session)
+
+        assert (
+            tmp_path
+            / "sessions"
+            / "user-123"
+            / "api_user-123_flow_flow-456_thread-1.jsonl"
+        ).exists()
+
     def test_flat_workspace_session_migrates_to_user_directory(self, tmp_path) -> None:
         manager = SessionManager(Path(tmp_path))
         messages = [{"role": "user", "content": "hello", "timestamp": "2026-01-01T00:00:00"}]

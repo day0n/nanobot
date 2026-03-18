@@ -113,7 +113,8 @@ class SessionManager:
         """Extract user_id from session key for directory isolation.
 
         Key formats:
-          api:{user_id}:{session_id}  → user_id
+          api:{user_id}:{session_id}                 → user_id
+          api:{user_id}:flow:{flow_id}:{session_id} → user_id
           telegram:{user_id}          → user_id
           discord:{user_id}           → user_id
           cli:direct                  → _local
