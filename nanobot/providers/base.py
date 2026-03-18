@@ -276,10 +276,27 @@ class LLMProvider(ABC):
         if reasoning_effort is self._SENTINEL:
             reasoning_effort = self.generation.reasoning_effort
 
+        resolved_model = model or self.get_default_model()
+        provider_name = self.__class__.__name__
         kw: dict[str, Any] = dict(
             messages=messages, tools=tools, model=model,
             max_tokens=max_tokens, temperature=temperature,
             reasoning_effort=reasoning_effort, tool_choice=tool_choice,
+        )
+        logger.info(
+            "LLM request [{}] model={} payload={}",
+            provider_name,
+            resolved_model,
+            self._to_log_json(
+                {
+                    "messages": messages,
+                    "tools": tools,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "reasoning_effort": reasoning_effort,
+                    "tool_choice": tool_choice,
+                }
+            ),
         )
 
         for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
