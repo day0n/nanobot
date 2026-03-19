@@ -182,7 +182,7 @@
 - 输入：`text` 必填
 - 输出：`image`
 - 最大输入连线：无限制
-- 默认模型：`["minimax/hailuo-image-01"]`
+- 默认模型：`["fal-ai/nano-banana"]`
 - 附加字段：`lensStyleEnabled`=`false`，`lensStyle.camera_style`=`"none"`，`lensStyle.lens_preset`=`"none"`，`lensStyle.focal_length`=`"none"`，`lensStyle.lighting_style`=`"none"`
 - 运行要求：`selectedModels.length > 0`；`inputText` 有内容或有 `text` 上游
 - **需要强制 selectedModels 校验**

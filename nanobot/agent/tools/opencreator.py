@@ -595,6 +595,17 @@ class EditWorkflowTool(Tool):
         result_flow_id = data.get("flow_id") or data.get("data", {}).get("flow_id") or flow_id
         editor_url = f"{self.editor_base}/canvas/{result_flow_id}"
 
+        # Emit workflow_update SSE event so the frontend can refresh the canvas
+        on_progress = request_context.get("_on_progress")
+        if callable(on_progress):
+            try:
+                await on_progress(
+                    json.dumps({"flow_id": result_flow_id}, ensure_ascii=False),
+                    event_type="workflow_update",
+                )
+            except Exception as e:
+                logger.warning("Failed to emit workflow_update event: {}", e)
+
         message = (
             f"Workflow updated successfully!\n"
             f"  flow_id: {result_flow_id}\n"

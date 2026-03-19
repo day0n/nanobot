@@ -349,7 +349,10 @@ class AgentLoop:
         private_context: dict[str, Any] | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
-        request_ctx_token = set_request_context(private_context)
+        ctx = dict(private_context or {})
+        if on_progress is not None:
+            ctx["_on_progress"] = on_progress
+        request_ctx_token = set_request_context(ctx)
         # System messages: parse origin from chat_id ("channel:chat_id")
         try:
             if msg.channel == "system":

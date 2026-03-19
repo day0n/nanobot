@@ -166,9 +166,12 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         async def event_stream():
             queue: asyncio.Queue = asyncio.Queue()
 
-            async def on_progress(content: str, *, tool_hint: bool = False):
-                event_type = "tool" if tool_hint else "progress"
-                await queue.put({"type": event_type, "content": content})
+            async def on_progress(content: str, *, tool_hint: bool = False, event_type: str | None = None):
+                if event_type:
+                    await queue.put({"type": event_type, "content": content})
+                else:
+                    resolved_type = "tool" if tool_hint else "progress"
+                    await queue.put({"type": resolved_type, "content": content})
 
             async def run_agent():
                 try:
