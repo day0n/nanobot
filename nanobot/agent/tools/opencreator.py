@@ -478,47 +478,39 @@ def _normalize_edges(
     return normalized_edges, warnings
 
 
-class CreateWorkflowTool(Tool):
-    """Create an OpenCreator workflow via the Internal API."""
+class EditWorkflowTool(Tool):
+    """Edit an OpenCreator workflow in the current canvas via the Internal API."""
 
-    name = "create_workflow"
+    name = "edit_workflow"
     description = (
-        "Save a fully-constructed OpenCreator workflow (nodes + edges) via the OpenCreator internal workflow API. "
-        "If the request is running inside an authenticated canvas session, the tool uses the caller's JWT and "
-        "current flow_id automatically; otherwise it can fall back to the legacy internal-email flow. "
+        "Update the workflow (nodes + edges) in the current canvas session. "
+        "Requires an authenticated canvas context with flow_id and user_id (both provided automatically). "
         "The tool performs preflight normalization/validation to keep payloads frontend-compatible "
         "(node defaults, edge handle compatibility, dangling-edge cleanup). "
-        "Returns the flow_id and an editor URL the user can open."
+        "Each node MUST include a position with x/y coordinates for correct canvas layout."
     )
     parameters = {
         "type": "object",
         "properties": {
-            "user_email": {
-                "type": "string",
-                "description": "Legacy fallback only. Email address of the user who will own the workflow if no authenticated JWT context is available.",
-            },
-            "workflow_name": {
-                "type": "string",
-                "description": "Display name for the workflow project.",
-            },
             "nodes": {
                 "type": "array",
                 "description": (
-                    "Array of node objects. Each node should include at least type/id/position/data. "
-                    "The tool will auto-fill missing default fields and sanitize invalid values."
+                    "Array of node objects. Each node MUST include type, id, position ({x, y}), and data. "
+                    "Position is required for correct canvas layout — do NOT omit it. "
+                    "The tool will auto-fill missing default fields in data and sanitize invalid values."
                 ),
                 "items": {"type": "object"},
             },
             "edges": {
                 "type": "array",
                 "description": (
-                    "Array of edge objects with source/target/handles. "
+                    "Array of edge objects with source/target/sourceHandle/targetHandle. "
                     "The tool will remove dangling edges, infer missing handles, and enforce compatible handle types."
                 ),
                 "items": {"type": "object"},
             },
         },
-        "required": ["workflow_name", "nodes", "edges"],
+        "required": ["nodes", "edges"],
     }
 
     def __init__(
@@ -539,30 +531,21 @@ class CreateWorkflowTool(Tool):
     async def execute(
         self,
         *,
-        workflow_name: str,
         nodes: list,
         edges: list,
-        user_email: str = "",
         **_: Any,
     ) -> str:
         request_context = get_request_context()
-        auth_token = request_context.get("auth_token")
+        user_id = request_context.get("user_id")
         flow_id = request_context.get("flow_id")
-        time_zone = request_context.get("time_zone")
-        email = user_email.strip() if isinstance(user_email, str) else ""
-        name = workflow_name.strip() if isinstance(workflow_name, str) else ""
-        if not name:
-            return "Error: `workflow_name` is required."
-        if not isinstance(auth_token, str) or not auth_token.strip():
-            auth_token = ""
-        else:
-            auth_token = auth_token.strip()
+
+        if not isinstance(user_id, str) or not user_id.strip():
+            return "Error: no authenticated user context. This tool requires a canvas session with a logged-in user."
+        user_id = user_id.strip()
+
         if not isinstance(flow_id, str) or not flow_id.strip():
-            flow_id = ""
-        else:
-            flow_id = flow_id.strip()
-        if not auth_token and not email:
-            return "Error: `user_email` is required when no authenticated API request context is available."
+            return "Error: no flow_id in context. This tool requires an active canvas session with an existing workflow."
+        flow_id = flow_id.strip()
 
         normalized_nodes, id_map, node_warnings = _normalize_nodes(nodes)
         if not normalized_nodes:
@@ -578,35 +561,28 @@ class CreateWorkflowTool(Tool):
         preflight_warnings = node_warnings + edge_warnings
 
         payload = {
-            "project_name": name,
+            "user_id": user_id,
+            "flow_id": flow_id,
             "nodes": normalized_nodes,
             "edges": normalized_edges,
         }
-        if email:
-            payload["user_email"] = email
-        if flow_id:
-            payload["flow_id"] = flow_id
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {auth_token}" if auth_token else self._auth_header(),
+            "Authorization": self._auth_header(),
         }
-        if isinstance(time_zone, str) and time_zone.strip():
-            headers["X-Time-Zone"] = time_zone.strip()
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
-                    f"{self.api_base.rstrip('/')}/api/internal/workflow/create-by-email",
+                    f"{self.api_base.rstrip('/')}/api/internal/workflow/edit",
                     headers=headers,
                     content=json.dumps(payload, ensure_ascii=False),
                 )
         except Exception as e:
-            logger.error("create_workflow HTTP error: {}", e)
+            logger.error("edit_workflow HTTP error: {}", e)
             return f"Error: HTTP request failed — {e}"
 
         if resp.status_code == 404:
-            if email:
-                return f"Error: User not found for email '{user_email}'. Please check the email address."
-            return "Error: Target workflow or user context was not found."
+            return "Error: workflow or user not found."
 
         if not resp.is_success:
             return f"Error: API returned {resp.status_code} — {resp.text[:500]}"
@@ -616,20 +592,13 @@ class CreateWorkflowTool(Tool):
         except Exception:
             return f"Error: Could not parse API response — {resp.text[:300]}"
 
-        flow_id = data.get("flow_id") or data.get("id") or data.get("data", {}).get("flow_id")
-        if not flow_id:
-            return f"Workflow created but could not extract flow_id. Raw response: {resp.text[:300]}"
+        result_flow_id = data.get("flow_id") or data.get("data", {}).get("flow_id") or flow_id
+        editor_url = f"{self.editor_base}/canvas/{result_flow_id}"
 
-        # Frontend route is /canvas/{flow_id}. Some deployments use locale-prefixed routing.
-        editor_url = f"{self.editor_base}/canvas/{flow_id}"
-        editor_url_with_locale = f"{self.editor_base}/en/canvas/{flow_id}"
-
-        action = "updated" if flow_id else "created"
         message = (
-            f"Workflow {action} successfully!\n"
-            f"  flow_id: {flow_id}\n"
+            f"Workflow updated successfully!\n"
+            f"  flow_id: {result_flow_id}\n"
             f"  Editor URL: {editor_url}\n"
-            f"  Fallback URL: {editor_url_with_locale}\n"
             f"  Nodes: {len(normalized_nodes)}, Edges: {len(normalized_edges)}"
         )
         if preflight_warnings:

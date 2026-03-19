@@ -23,7 +23,7 @@ from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
-from nanobot.agent.tools.opencreator import CreateWorkflowTool
+from nanobot.agent.tools.opencreator import EditWorkflowTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
@@ -132,7 +132,7 @@ class AgentLoop:
         # Disabled for chatbot-only rollout: scheduled actions are out of scope.
         # if self.cron_service:
         #     self.tools.register(CronTool(self.cron_service))
-        self.tools.register(CreateWorkflowTool(
+        self.tools.register(EditWorkflowTool(
             api_base=self.api_config.internal_api_base,
             internal_api_key=self.api_config.internal_api_key,
             editor_base=self.api_config.editor_base,
@@ -371,6 +371,7 @@ class AgentLoop:
                 final_content, _, all_msgs = await self._run_agent_loop(messages)
                 self._save_turn(session, all_msgs, 1 + len(history))
                 await self.sessions.save(session)
+                self._maybe_generate_summary(session)
                 return OutboundMessage(channel=channel, chat_id=chat_id,
                                       content=final_content or "Background task completed.")
 
@@ -439,6 +440,7 @@ class AgentLoop:
 
             self._save_turn(session, all_msgs, 1 + len(history))
             await self.sessions.save(session)
+            self._maybe_generate_summary(session)
 
             if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
                 return None
@@ -495,6 +497,58 @@ class AgentLoop:
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)
         session.updated_at = datetime.now()
+
+    _SUMMARY_PROMPT = (
+        "Generate a concise title (3-7 words) for this conversation. "
+        "Reply with ONLY the title, no quotes or punctuation. "
+        "Use the same language as the user's message."
+    )
+
+    def _maybe_generate_summary(self, session: Session) -> None:
+        """Schedule async summary generation if this is the first turn and no summary exists."""
+        if session.summary or len(session.messages) < 2:
+            return
+        self._schedule_background(self._generate_summary(session))
+
+    async def _generate_summary(self, session: Session) -> None:
+        """Generate a summary title for the session via LLM (background task)."""
+        try:
+            # Extract first user message and first assistant response
+            first_user = first_assistant = None
+            for m in session.messages:
+                role = m.get("role")
+                content = m.get("content")
+                if role == "user" and not first_user and isinstance(content, str):
+                    first_user = content[:500]
+                elif role == "assistant" and not first_assistant and isinstance(content, str):
+                    first_assistant = content[:500]
+                if first_user and first_assistant:
+                    break
+
+            if not first_user:
+                return
+
+            context = f"User: {first_user}"
+            if first_assistant:
+                context += f"\nAssistant: {first_assistant}"
+
+            response = await self.provider.chat_with_retry(
+                messages=[
+                    {"role": "system", "content": self._SUMMARY_PROMPT},
+                    {"role": "user", "content": context},
+                ],
+                model=self.model,
+                max_tokens=50,
+                temperature=0.7,
+            )
+
+            summary = (response.content or "").strip()
+            if summary:
+                session.summary = summary
+                await self.sessions.save_summary(session.key, summary)
+                logger.debug("Generated summary for session {}: {}", session.key, summary)
+        except Exception:
+            logger.warning("Failed to generate summary for session {}", session.key)
 
     async def process_direct(
         self,

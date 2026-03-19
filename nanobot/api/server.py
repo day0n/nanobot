@@ -205,6 +205,14 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             },
         )
 
+    @app.get("/v1/agent/sessions")
+    async def list_sessions(
+        authorization: str | None = Header(default=None),
+    ):
+        auth_user = _authenticate_agent_request(authorization, cfg)
+        sessions = await session_manager.list_sessions(user_id=auth_user.user_id)
+        return {"sessions": sessions}
+
     @app.get("/health")
     async def health():
         return {"status": "ok"}

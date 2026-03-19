@@ -35,6 +35,7 @@ class Session:
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
+    summary: str | None = field(default=None)
     _persisted_count: int = field(default=0, repr=False)
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
@@ -100,6 +101,7 @@ class Session:
         """Clear all messages and reset session to initial state."""
         self.messages = []
         self._persisted_count = 0
+        self.summary = None
         self.updated_at = datetime.now()
 
 
@@ -148,14 +150,17 @@ class SessionManager:
 
         try:
             # Upsert session metadata (no messages stored here)
+            set_fields: dict[str, Any] = {
+                "user_id": self._extract_user_id(session.key),
+                "updated_at": now,
+                "metadata": session.metadata,
+            }
+            if session.summary is not None:
+                set_fields["summary"] = session.summary
             await self._sessions_col.update_one(
                 {"_id": session.key},
                 {
-                    "$set": {
-                        "user_id": self._extract_user_id(session.key),
-                        "updated_at": now,
-                        "metadata": session.metadata,
-                    },
+                    "$set": set_fields,
                     "$setOnInsert": {
                         "created_at": session.created_at,
                     },
@@ -193,14 +198,15 @@ class SessionManager:
             await self._messages_col.delete_many({"session_key": key})
             await self._sessions_col.update_one(
                 {"_id": key},
-                {"$set": {"updated_at": datetime.now(), "metadata": {}}},
+                {"$set": {"updated_at": datetime.now(), "metadata": {}, "summary": None}},
             )
         except Exception:
             logger.warning("Failed to invalidate session {} in MongoDB", key)
 
-    async def list_sessions(self) -> list[dict[str, Any]]:
+    async def list_sessions(self, user_id: str | None = None) -> list[dict[str, Any]]:
         """List all sessions (without messages) sorted by updated_at desc."""
-        cursor = self._sessions_col.find({}).sort("updated_at", -1)
+        query: dict[str, Any] = {"user_id": user_id} if user_id else {}
+        cursor = self._sessions_col.find(query).sort("updated_at", -1)
         sessions = []
         async for doc in cursor:
             sessions.append({
@@ -208,8 +214,29 @@ class SessionManager:
                 "created_at": doc.get("created_at", ""),
                 "updated_at": doc.get("updated_at", ""),
                 "user_id": doc.get("user_id", ""),
+                "summary": doc.get("summary"),
             })
         return sessions
+
+    async def save_summary(self, key: str, summary: str) -> None:
+        """Update only the summary field (used by background generation)."""
+        try:
+            await self._sessions_col.update_one(
+                {"_id": key}, {"$set": {"summary": summary}},
+            )
+            # Update Redis cache if it exists
+            redis_key = f"{REDIS_SESSION_PREFIX}{key}"
+            raw = await self._redis.get(redis_key)
+            if raw:
+                doc = json.loads(raw)
+                doc["summary"] = summary
+                await self._redis.set(
+                    redis_key,
+                    json.dumps(doc, ensure_ascii=False),
+                    ex=REDIS_SESSION_TTL,
+                )
+        except Exception:
+            logger.warning("Failed to save summary for session {}", key)
 
     # -- static helpers --------------------------------------------------------
 
@@ -256,6 +283,7 @@ class SessionManager:
             "created_at": session.created_at.isoformat(),
             "updated_at": session.updated_at.isoformat(),
             "metadata": session.metadata,
+            "summary": session.summary,
             "_persisted_count": len(session.messages),
         }
         try:
@@ -313,6 +341,7 @@ class SessionManager:
                 created_at=created or datetime.now(),
                 updated_at=updated or datetime.now(),
                 metadata=meta_doc.get("metadata", {}),
+                summary=meta_doc.get("summary"),
                 _persisted_count=len(messages),
             )
             return session
@@ -336,5 +365,6 @@ class SessionManager:
             created_at=created or datetime.now(),
             updated_at=updated or datetime.now(),
             metadata=doc.get("metadata", {}),
+            summary=doc.get("summary"),
             _persisted_count=doc.get("_persisted_count", len(messages)),
         )
