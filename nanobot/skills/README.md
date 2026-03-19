@@ -22,5 +22,3 @@ The skill format and metadata structure follow OpenClaw's conventions to maintai
 | `weather` | Get weather info using wttr.in and Open-Meteo | No |
 | `summarize` | Summarize URLs, files, and YouTube videos | No |
 | `cron` | Schedule recurring tasks | No |
-| `clawhub` | Search and install skills from ClawHub registry | No |
-| `skill-creator` | Create new skills | No |
