@@ -70,45 +70,7 @@
 - 少接了必需输入（例如 `videoLipSync` 必须同时有视频和音频）。
 - 输入类型不匹配（例如把 `text` 接到 `image` 输入）。
 
-## 5) 场景模板（可直接复用）
 
-### A. 快速文生图
-- 链路：`textInput -> imageMaker`
-- 适用：海报、封面、产品概念图
-
-### B. 快速文生视频
-- 链路：`textInput -> textToVideo`
-- 适用：概念片、短广告草稿
-
-### C. 图生视频（更可控）
-- 链路：`textInput -> imageMaker -> videoMaker`
-- 适用：先定画面风格，再做动效
-
-### D. 分镜叙事视频
-- 链路：`textInput -> textGenerator -> scriptSplit -> imageMaker -> videoMaker`
-- 适用：剧情短片、分镜展示
-
-### E. 视频改造升级
-- 链路：`videoInput + textInput -> videoToVideo -> videoUpscaler`
-- 适用：老片风格重做、画面清晰度提升
-
-### F. 真人视频配音口播
-- 链路：`textInput -> textToSpeech`，`videoInput + audio -> videoLipSync`
-- 适用：讲解视频、多语言口播
-
-### G. 图片数字人口播
-- 链路：`textInput -> textToSpeech`，`imageInput + audio + text -> imageAudioToVideo`
-- 适用：虚拟主播、商品讲解人像
-
-### H. 商品图精修
-- 链路：`imageInput -> backgroundEditor -> relight -> imageUpscaler`
-- 适用：电商主图、详情页图
-
-## 6) 推荐策略（给用户解释时）
-
-- 快速版：节点少、先跑通。
-- 增强版：在快速版上加 1-3 个增强节点（打光/角度/高清化/口型同步）。
-- 用户没特别要求时，优先推荐默认模型，保证稳定。
 
 ## 7) 输出建议（agent 回复格式）
 
