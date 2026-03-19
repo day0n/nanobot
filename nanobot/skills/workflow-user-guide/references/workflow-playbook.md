@@ -47,17 +47,21 @@
 ### Handy
 - `assembleNow`：素材拼装编辑
 - `stickyNodesNode`：画布注释
+- `groupNode`：画布分组容器，把相关节点框在一起
 
-说明：Handy 节点用于组织工作，不建议放在自动执行主链路里。
+说明：Handy 节点用于组织工作，不参与自动执行，不建议放在执行主链路里。
 
 ## 3) 连线规则（简化版）
+
+系统共 6 种 Pin 类型：`text`、`image`、`video`、`audio`、`subject`、`style`。
 
 - 只连同类：
   - `text -> text`
   - `image -> image`
   - `video -> video`
   - `audio -> audio`
-- `videoToVideo` 的 `subject/style` 可以接图片。
+- `subject` 和 `style` 是 `image` 的别名，`image` 输出可以接到 `subject` 或 `style` 输入（如 `videoToVideo` 的风格/主体参考）。
+
 - 建议从左到右单向连线，不要回连到上游节点。
 
 ## 4) 常见“连不上”原因
@@ -113,3 +117,4 @@
 3. 节点说明：每个节点一句话  
 4. 最小改造补丁：`add_node/remove_node/reconnect/update_model`  
 5. 操作提醒：避免连线类型错误、缺失必填输入、超连接上限
+
