@@ -164,6 +164,23 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+class MongoDBConfig(Base):
+    """MongoDB connection configuration."""
+
+    uri: str = "mongodb://localhost:27017"  # MongoDB Atlas URI (mongodb+srv://...)
+    db: str = "nanobot"
+
+
+class RedisConfig(Base):
+    """Redis connection configuration."""
+
+    host: str = "localhost"
+    port: int = 6379
+    db: int = 0
+    password: str = ""
+    ssl: bool = False  # AWS ElastiCache requires SSL
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
@@ -173,6 +190,8 @@ class Config(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     api: ApiServerConfig = Field(default_factory=ApiServerConfig)
+    mongodb: MongoDBConfig = Field(default_factory=MongoDBConfig)
+    redis: RedisConfig = Field(default_factory=RedisConfig)
 
     @property
     def workspace_path(self) -> Path:

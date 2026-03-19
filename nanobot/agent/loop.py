@@ -84,7 +84,9 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
 
         self.context = ContextBuilder(workspace)
-        self.sessions = session_manager or SessionManager(workspace)
+        if session_manager is None:
+            raise ValueError("session_manager is required (must not be None)")
+        self.sessions = session_manager
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
             provider=provider,
@@ -112,20 +114,24 @@ class AgentLoop:
         allowed_dir = self.workspace if self.restrict_to_workspace else None
         extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
         self.tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read))
-        for cls in (WriteFileTool, EditFileTool, ListDirTool):
-            self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
-        self.tools.register(ExecTool(
-            working_dir=str(self.workspace),
-            timeout=self.exec_config.timeout,
-            restrict_to_workspace=self.restrict_to_workspace,
-            path_append=self.exec_config.path_append,
-        ))
+        # Disabled for chatbot-only rollout: do not expose workspace mutation tools.
+        # for cls in (WriteFileTool, EditFileTool, ListDirTool):
+        #     self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
+        # Disabled for chatbot-only rollout: do not expose shell execution.
+        # self.tools.register(ExecTool(
+        #     working_dir=str(self.workspace),
+        #     timeout=self.exec_config.timeout,
+        #     restrict_to_workspace=self.restrict_to_workspace,
+        #     path_append=self.exec_config.path_append,
+        # ))
         self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
-        self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
+        # Disabled for chatbot-only rollout: replies return through the normal outbound path.
+        # self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
-        if self.cron_service:
-            self.tools.register(CronTool(self.cron_service))
+        # Disabled for chatbot-only rollout: scheduled actions are out of scope.
+        # if self.cron_service:
+        #     self.tools.register(CronTool(self.cron_service))
         self.tools.register(CreateWorkflowTool(
             api_base=self.api_config.internal_api_base,
             internal_api_key=self.api_config.internal_api_key,
@@ -134,25 +140,8 @@ class AgentLoop:
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
-        if self._mcp_connected or self._mcp_connecting or not self._mcp_servers:
-            return
-        self._mcp_connecting = True
-        from nanobot.agent.tools.mcp import connect_mcp_servers
-        try:
-            self._mcp_stack = AsyncExitStack()
-            await self._mcp_stack.__aenter__()
-            await connect_mcp_servers(self._mcp_servers, self.tools, self._mcp_stack)
-            self._mcp_connected = True
-        except BaseException as e:
-            logger.error("Failed to connect MCP servers (will retry next message): {}", e)
-            if self._mcp_stack:
-                try:
-                    await self._mcp_stack.aclose()
-                except Exception:
-                    pass
-                self._mcp_stack = None
-        finally:
-            self._mcp_connecting = False
+        # Disabled for the restricted chatbot rollout: do not register dynamic MCP tools.
+        return
 
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Update context for all tools that need routing info."""
@@ -368,7 +357,7 @@ class AgentLoop:
                                     else ("cli", msg.chat_id))
                 logger.info("Processing system message from {}", msg.sender_id)
                 key = f"{channel}:{chat_id}"
-                session = self.sessions.get_or_create(key)
+                session = await self.sessions.get_or_create(key)
                 self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
                 history = session.get_history(max_messages=0)
                 # Subagent results should be assistant role, other system messages use user role
@@ -381,7 +370,7 @@ class AgentLoop:
                 )
                 final_content, _, all_msgs = await self._run_agent_loop(messages)
                 self._save_turn(session, all_msgs, 1 + len(history))
-                self.sessions.save(session)
+                await self.sessions.save(session)
                 return OutboundMessage(channel=channel, chat_id=chat_id,
                                       content=final_content or "Background task completed.")
 
@@ -396,14 +385,14 @@ class AgentLoop:
             )
 
             key = session_key or msg.session_key
-            session = self.sessions.get_or_create(key)
+            session = await self.sessions.get_or_create(key)
 
             # Slash commands
             cmd = msg.content.strip().lower()
             if cmd == "/new":
                 session.clear()
-                self.sessions.save(session)
-                self.sessions.invalidate(session.key)
+                await self.sessions.save(session)
+                await self.sessions.invalidate(session.key)
 
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                       content="New session started.")
@@ -449,7 +438,7 @@ class AgentLoop:
                 final_content = "I've completed processing but have no response to give."
 
             self._save_turn(session, all_msgs, 1 + len(history))
-            self.sessions.save(session)
+            await self.sessions.save(session)
 
             if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
                 return None
