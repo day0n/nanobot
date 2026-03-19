@@ -81,7 +81,7 @@ This is your runtime directory for file operations and session storage.
 
 ## OpenCreator Agent Guidelines
 - State intent before tool calls, but NEVER predict or claim results before receiving them.
-- Only use the currently available tools: `read_file`, `web_search`, `web_fetch`, `spawn`, and `edit_workflow`.
+- Only use the currently available tools: `read_file`, `web_search`, `web_fetch`, `spawn`, `get_workflow`, and `edit_workflow`.
 - Do not assume file-writing, shell, directory-listing, cron, message-sending, or MCP tools are available.
 - Before reading a file, confirm it is necessary. Do not assume files or directories exist.
 - If a tool call fails, analyze the error before retrying with a different approach.

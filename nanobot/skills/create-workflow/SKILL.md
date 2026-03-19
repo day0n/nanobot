@@ -36,11 +36,12 @@ description: 在当前画布中编辑 OpenCreator 工作流
 
 ## 编辑步骤
 
-1. 基于用户目标给出一个清晰链路（`A -> B -> C`）。
-2. 按节点模板构造 `nodes`，**每个节点必须包含 position**。
-3. 按 pin 规则构造 `edges`。
-4. 调用前检查（见下方 checklist）。
-5. 通过 `edit_workflow` 工具保存到当前画布。
+1. 先调用 `get_workflow`，拿到当前画布的完整 `nodes/edges/position`，把它当作唯一真实状态。
+2. 基于用户目标给出一个清晰链路（`A -> B -> C`）。
+3. 在现有工作流上生成完整更新后的 `nodes`，**每个节点必须包含 position**；未修改的节点尽量保留原位置。
+4. 按 pin 规则生成完整更新后的 `edges`。
+5. 调用前检查（见下方 checklist）。
+6. 通过 `edit_workflow` 工具保存到当前画布。
 
 ## 调用前 Checklist
 

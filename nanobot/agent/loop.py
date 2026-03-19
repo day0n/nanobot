@@ -23,7 +23,7 @@ from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
-from nanobot.agent.tools.opencreator import EditWorkflowTool
+from nanobot.agent.tools.opencreator import EditWorkflowTool, GetWorkflowTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
@@ -132,6 +132,7 @@ class AgentLoop:
         # Disabled for chatbot-only rollout: scheduled actions are out of scope.
         # if self.cron_service:
         #     self.tools.register(CronTool(self.cron_service))
+        self.tools.register(GetWorkflowTool(api_base=self.api_config.internal_api_base))
         self.tools.register(EditWorkflowTool(
             api_base=self.api_config.internal_api_base,
             internal_api_key=self.api_config.internal_api_key,

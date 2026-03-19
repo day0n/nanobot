@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from copy import deepcopy
 from typing import Any
 from uuid import uuid4
@@ -17,6 +18,8 @@ from nanobot.agent.tools.base import Tool
 _API_BASE = "https://api-develop.opencreator.io"
 _INTERNAL_AUTH = "ODljMGNjYzgtNjk5Ni00NGYzLWJlNDMtOWQ5NzIyYWNlOGVj"
 _EDITOR_BASE = "https://editor-dev.opencreator.io"
+_NODE_WIDTH = 360.0
+_DEFAULT_NODE_HEIGHT = 280.0
 
 _SUPPORTED_NODE_TYPES = {
     "textInput",
@@ -386,6 +389,10 @@ def _normalize_nodes(raw_nodes: Any) -> tuple[list[dict[str, Any]], dict[str, st
         if isinstance(pos_raw, dict):
             x = _as_number(pos_raw.get("x"), x)
             y = _as_number(pos_raw.get("y"), y)
+        else:
+            warnings.append(
+                f"nodes[{idx}] missing `position`; applied fallback grid position ({int(x)}, {int(y)})."
+            )
 
         node = {
             "id": node_id,
@@ -397,6 +404,59 @@ def _normalize_nodes(raw_nodes: Any) -> tuple[list[dict[str, Any]], dict[str, st
         normalized_nodes.append(node)
 
     return normalized_nodes, id_map, warnings
+
+
+def _estimate_node_height(node: dict[str, Any]) -> float:
+    raw_height = node.get("height")
+    if isinstance(raw_height, (int, float)) and raw_height > 0:
+        return float(raw_height)
+
+    style = node.get("style")
+    if isinstance(style, dict):
+        style_height = style.get("height")
+        if isinstance(style_height, (int, float)) and style_height > 0:
+            return float(style_height)
+
+    data = node.get("data")
+    if isinstance(data, dict):
+        data_height = data.get("height")
+        if isinstance(data_height, (int, float)) and data_height > 0:
+            return float(data_height)
+
+    return _DEFAULT_NODE_HEIGHT
+
+
+def _find_position_issues(nodes: list[dict[str, Any]]) -> list[str]:
+    warnings: list[str] = []
+    if len(nodes) < 2:
+        return warnings
+
+    overlap_count = 0
+    for idx, left in enumerate(nodes):
+        lx = _as_number(left.get("position", {}).get("x"), 0.0)
+        ly = _as_number(left.get("position", {}).get("y"), 0.0)
+        lh = _estimate_node_height(left)
+
+        for right in nodes[idx + 1 :]:
+            rx = _as_number(right.get("position", {}).get("x"), 0.0)
+            ry = _as_number(right.get("position", {}).get("y"), 0.0)
+            rh = _estimate_node_height(right)
+
+            same_spot = math.isclose(lx, rx, abs_tol=1.0) and math.isclose(ly, ry, abs_tol=1.0)
+            overlaps_x = abs(lx - rx) < _NODE_WIDTH
+            overlaps_y = abs(ly - ry) < max(lh, rh)
+
+            if same_spot or (overlaps_x and overlaps_y):
+                overlap_count += 1
+                if overlap_count <= 8:
+                    warnings.append(
+                        f"Potential overlap detected between `{left['id']}` and `{right['id']}`."
+                    )
+
+    if overlap_count > 8:
+        warnings.append(f"... and {overlap_count - 8} more potential overlaps.")
+
+    return warnings
 
 
 def _normalize_edges(
@@ -558,7 +618,8 @@ class EditWorkflowTool(Tool):
 
         nodes_by_id = {n["id"]: n for n in normalized_nodes}
         normalized_edges, edge_warnings = _normalize_edges(edges, nodes_by_id, id_map)
-        preflight_warnings = node_warnings + edge_warnings
+        position_warnings = _find_position_issues(normalized_nodes)
+        preflight_warnings = node_warnings + edge_warnings + position_warnings
 
         payload = {
             "user_id": user_id,
@@ -618,3 +679,101 @@ class EditWorkflowTool(Tool):
                 preview += f"\n  - ... and {len(preflight_warnings) - 8} more"
             message += f"\nPreflight adjustments:\n{preview}"
         return message
+
+
+class GetWorkflowTool(Tool):
+    """Fetch the current OpenCreator workflow in the active canvas session."""
+
+    name = "get_workflow"
+    description = (
+        "Fetch the complete current workflow from the active canvas session, including all nodes, "
+        "edges, and their current positions. Use this before editing an existing workflow so "
+        "unchanged nodes and layout can be preserved."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+
+    def __init__(self, api_base: str = ""):
+        self.api_base = api_base.strip() or _API_BASE
+
+    async def execute(self, **_: Any) -> str:
+        request_context = get_request_context()
+        flow_id = request_context.get("flow_id")
+        auth_token = request_context.get("auth_token")
+        on_progress = request_context.get("_on_progress")
+
+        if not isinstance(flow_id, str) or not flow_id.strip():
+            return "Error: no flow_id in context. This tool requires an active canvas session."
+        flow_id = flow_id.strip()
+
+        if not isinstance(auth_token, str) or not auth_token.strip():
+            return "Error: no authenticated user token in context."
+        auth_token = auth_token.strip()
+
+        headers = {
+            "Authorization": f"Bearer {auth_token}",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    f"{self.api_base.rstrip('/')}/api/v2/flow/project/{flow_id}",
+                    headers=headers,
+                )
+        except Exception as e:
+            logger.error("get_workflow HTTP error: {}", e)
+            return f"Error: HTTP request failed — {e}"
+
+        if resp.status_code == 404:
+            return "Error: workflow not found."
+
+        if not resp.is_success:
+            return f"Error: API returned {resp.status_code} — {resp.text[:500]}"
+
+        try:
+            payload = resp.json()
+        except Exception:
+            return f"Error: Could not parse API response — {resp.text[:300]}"
+
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            return "Error: workflow response missing `data` object."
+
+        nodes = data.get("nodes")
+        edges = data.get("edges")
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            return "Error: workflow response missing valid `nodes` or `edges`."
+
+        project_name = None
+        details = data.get("details")
+        if isinstance(details, dict):
+            project_name = details.get("project_name")
+
+        result = {
+            "flow_id": data.get("flow_id", flow_id),
+            "project_name": project_name,
+            "nodes": nodes,
+            "edges": edges,
+        }
+
+        if callable(on_progress):
+            try:
+                await on_progress(
+                    json.dumps(
+                        {
+                            "flow_id": result["flow_id"],
+                            "project_name": project_name,
+                            "node_count": len(nodes),
+                            "edge_count": len(edges),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    event_type="get_workflow",
+                )
+            except Exception as e:
+                logger.warning("Failed to emit get_workflow event: {}", e)
+
+        return json.dumps(result, ensure_ascii=False, indent=2)
