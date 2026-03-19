@@ -84,7 +84,9 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
 
         self.context = ContextBuilder(workspace)
-        self.sessions = session_manager or SessionManager(workspace)
+        if session_manager is None:
+            raise ValueError("session_manager is required (must not be None)")
+        self.sessions = session_manager
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
             provider=provider,
@@ -368,7 +370,7 @@ class AgentLoop:
                                     else ("cli", msg.chat_id))
                 logger.info("Processing system message from {}", msg.sender_id)
                 key = f"{channel}:{chat_id}"
-                session = self.sessions.get_or_create(key)
+                session = await self.sessions.get_or_create(key)
                 self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
                 history = session.get_history(max_messages=0)
                 # Subagent results should be assistant role, other system messages use user role
@@ -381,7 +383,7 @@ class AgentLoop:
                 )
                 final_content, _, all_msgs = await self._run_agent_loop(messages)
                 self._save_turn(session, all_msgs, 1 + len(history))
-                self.sessions.save(session)
+                await self.sessions.save(session)
                 return OutboundMessage(channel=channel, chat_id=chat_id,
                                       content=final_content or "Background task completed.")
 
@@ -396,14 +398,14 @@ class AgentLoop:
             )
 
             key = session_key or msg.session_key
-            session = self.sessions.get_or_create(key)
+            session = await self.sessions.get_or_create(key)
 
             # Slash commands
             cmd = msg.content.strip().lower()
             if cmd == "/new":
                 session.clear()
-                self.sessions.save(session)
-                self.sessions.invalidate(session.key)
+                await self.sessions.save(session)
+                await self.sessions.invalidate(session.key)
 
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                       content="New session started.")
@@ -449,7 +451,7 @@ class AgentLoop:
                 final_content = "I've completed processing but have no response to give."
 
             self._save_turn(session, all_msgs, 1 + len(history))
-            self.sessions.save(session)
+            await self.sessions.save(session)
 
             if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
                 return None

@@ -463,6 +463,8 @@ def gateway(
     from nanobot.config.paths import get_cron_dir
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
+    from nanobot.database.mongo import init_mongo, test_mongo, ensure_indexes, agent_sessions_collection, agent_session_messages_collection
+    from nanobot.database.redis import init_redis, test_redis, redis_client as get_redis_client
     from nanobot.heartbeat.service import HeartbeatService
     from nanobot.session.manager import SessionManager
 
@@ -476,13 +478,21 @@ def gateway(
     console.print(f"{__logo__} Starting nanobot gateway version {__version__} on port {port}...")
     bus = MessageBus()
     provider = _make_provider(config)
-    session_manager = SessionManager(config.workspace_path)
+
+    # Initialize database connections (module-level singletons)
+    init_mongo(config.mongodb.uri, config.mongodb.db)
+    init_redis(config.redis.host, config.redis.port, config.redis.password, config.redis.db, config.redis.ssl)
+
+    # Create SessionManager synchronously (Motor/Redis clients don't do I/O at creation)
+    from nanobot.database.mongo import agent_sessions_collection, agent_session_messages_collection
+    from nanobot.database.redis import redis_client
+    session_manager = SessionManager(agent_sessions_collection, agent_session_messages_collection, redis_client)
 
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_cron_dir() / "jobs.json"
     cron = CronService(cron_store_path)
 
-    # Create agent with cron service
+    # Create agent with cron service and SessionManager
     agent = AgentLoop(
         bus=bus,
         provider=provider,
@@ -550,11 +560,11 @@ def gateway(
     # Create channel manager
     channels = ChannelManager(config, bus)
 
-    def _pick_heartbeat_target() -> tuple[str, str]:
+    async def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""
         enabled = set(channels.enabled_channels)
         # Prefer the most recently updated non-internal session on an enabled channel.
-        for item in session_manager.list_sessions():
+        for item in await session_manager.list_sessions():
             key = item.get("key") or ""
             if ":" not in key:
                 continue
@@ -569,7 +579,7 @@ def gateway(
     # Create heartbeat service
     async def on_heartbeat_execute(tasks: str) -> str:
         """Phase 2: execute heartbeat tasks through the full agent loop."""
-        channel, chat_id = _pick_heartbeat_target()
+        channel, chat_id = await _pick_heartbeat_target()
 
         async def _silent(*_args, **_kwargs):
             pass
@@ -585,7 +595,7 @@ def gateway(
     async def on_heartbeat_notify(response: str) -> None:
         """Deliver a heartbeat response to the user's channel."""
         from nanobot.bus.events import OutboundMessage
-        channel, chat_id = _pick_heartbeat_target()
+        channel, chat_id = await _pick_heartbeat_target()
         if channel == "cli":
             return  # No external channel available to deliver to
         await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response))
@@ -613,7 +623,13 @@ def gateway(
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
     async def run():
+        nonlocal session_manager
         try:
+            # Test database connections (async)
+            await test_mongo()
+            await test_redis()
+            await ensure_indexes()
+
             await cron.start()
             await heartbeat.start()
             await asyncio.gather(
@@ -632,6 +648,13 @@ def gateway(
             cron.stop()
             agent.stop()
             await channels.stop_all()
+            # Close database connections
+            from nanobot.database.mongo import mongo_client
+            from nanobot.database.redis import redis_client
+            if redis_client:
+                await redis_client.close()
+            if mongo_client:
+                mongo_client.close()
 
     asyncio.run(run())
 
@@ -684,11 +707,23 @@ def agent(
     from nanobot.bus.queue import MessageBus
     from nanobot.config.paths import get_cron_dir
     from nanobot.cron.service import CronService
+    from nanobot.database.mongo import init_mongo, test_mongo, ensure_indexes
+    from nanobot.database.redis import init_redis, test_redis
 
     config = _load_runtime_config(config, workspace)
 
     bus = MessageBus()
     provider = _make_provider(config)
+
+    # Initialize database connections
+    init_mongo(config.mongodb.uri, config.mongodb.db)
+    init_redis(config.redis.host, config.redis.port, config.redis.password, config.redis.db, config.redis.ssl)
+
+    # Create SessionManager synchronously (Motor/Redis clients don't do I/O at creation)
+    from nanobot.database.mongo import agent_sessions_collection, agent_session_messages_collection
+    from nanobot.database.redis import redis_client
+    from nanobot.session.manager import SessionManager
+    session_manager = SessionManager(agent_sessions_collection, agent_session_messages_collection, redis_client)
 
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron_store_path = get_cron_dir() / "jobs.json"
@@ -712,9 +747,16 @@ def agent(
         exec_config=config.tools.exec,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
+        session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
     )
+
+    async def _init_db_and_session_manager():
+        """Test DB connections and create indexes."""
+        await test_mongo()
+        await test_redis()
+        await ensure_indexes()
 
     # Shared reference for progress callbacks
     _thinking: _ThinkingSpinner | None = None
@@ -730,6 +772,7 @@ def agent(
     if message:
         # Single message mode — direct call, no bus needed
         async def run_once():
+            await _init_db_and_session_manager()
             nonlocal _thinking
             _thinking = _ThinkingSpinner(enabled=not logs)
             with _thinking:
@@ -767,6 +810,7 @@ def agent(
             signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
         async def run_interactive():
+            await _init_db_and_session_manager()
             bus_task = asyncio.create_task(agent_loop.run())
             turn_done = asyncio.Event()
             turn_done.set()

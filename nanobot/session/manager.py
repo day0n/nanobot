@@ -1,24 +1,31 @@
-"""Session management for conversation history."""
+"""Session management for conversation history.
+
+Persistence: MongoDB (primary) + Redis (cache layer).
+
+Schema:
+  - ``agent_sessions`` — one document per session (metadata only, no messages).
+  - ``agent_session_messages`` — one document per message, append-only.
+
+Write path is append-only: only newly added messages are ``insert_many``-ed.
+Read path: Redis cache → MongoDB (dual-collection query) → create new.
+"""
 
 import json
-import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
-from nanobot.config.paths import get_legacy_sessions_dir
-from nanobot.utils.helpers import ensure_dir, safe_filename
+
+REDIS_SESSION_PREFIX = "nanobot:session:"
+REDIS_SESSION_TTL = 60 * 60 * 24  # 24 hours
 
 
 @dataclass
 class Session:
     """
     A conversation session.
-
-    Stores messages in JSONL format for easy reading and persistence.
 
     Important: Messages are append-only for LLM cache efficiency.
     """
@@ -28,6 +35,7 @@ class Session:
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
+    _persisted_count: int = field(default=0, repr=False)
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
@@ -91,26 +99,123 @@ class Session:
     def clear(self) -> None:
         """Clear all messages and reset session to initial state."""
         self.messages = []
+        self._persisted_count = 0
         self.updated_at = datetime.now()
 
 
+# ---------------------------------------------------------------------------
+# SessionManager — MongoDB (persistent) + Redis (cache)
+# ---------------------------------------------------------------------------
+
 class SessionManager:
     """
-    Manages conversation sessions.
+    Manages conversation sessions with MongoDB + Redis.
 
-    Sessions are stored as JSONL files organized by user_id:
-    sessions/<user_id>/<session_id>.jsonl
+    Read path:  Redis → MongoDB → create new
+    Write path: append-only insert_many (new messages) + update_one (metadata) + Redis SET
     """
 
-    def __init__(self, workspace: Path):
-        self.workspace = workspace
-        self.sessions_dir = ensure_dir(self.workspace / "sessions")
-        self.legacy_sessions_dir = get_legacy_sessions_dir()
-        self._cache: dict[str, Session] = {}
+    def __init__(self, mongo_sessions_col, mongo_messages_col, redis_client) -> None:
+        self._sessions_col = mongo_sessions_col
+        self._messages_col = mongo_messages_col
+        self._redis = redis_client
+
+    # -- public API (all async) ------------------------------------------------
+
+    async def get_or_create(self, key: str) -> Session:
+        """Get an existing session or create a new one."""
+        # 1. Redis cache
+        session = await self._load_from_redis(key)
+        if session is not None:
+            return session
+
+        # 2. MongoDB (dual-collection)
+        session = await self._load_from_mongo(key)
+        if session is not None:
+            # Warm Redis cache
+            await self._write_redis(session)
+            return session
+
+        # 3. New session
+        session = Session(key=key)
+        return session
+
+    async def save(self, session: Session) -> None:
+        """Persist new messages to MongoDB (append-only) and update Redis cache."""
+        now = datetime.now()
+        session.updated_at = now
+        new_messages = session.messages[session._persisted_count:]
+
+        try:
+            # Upsert session metadata (no messages stored here)
+            await self._sessions_col.update_one(
+                {"_id": session.key},
+                {
+                    "$set": {
+                        "user_id": self._extract_user_id(session.key),
+                        "updated_at": now,
+                        "metadata": session.metadata,
+                    },
+                    "$setOnInsert": {
+                        "created_at": session.created_at,
+                    },
+                },
+                upsert=True,
+            )
+
+            # Append only new messages
+            if new_messages:
+                base_seq = session._persisted_count
+                docs = [
+                    {
+                        "session_key": session.key,
+                        "seq": base_seq + i,
+                        **msg,
+                    }
+                    for i, msg in enumerate(new_messages)
+                ]
+                await self._messages_col.insert_many(docs, ordered=True)
+                session._persisted_count = len(session.messages)
+        except Exception:
+            logger.exception("Failed to save session {} to MongoDB", session.key)
+            raise
+
+        await self._write_redis(session)
+
+    async def invalidate(self, key: str) -> None:
+        """Remove session messages from MongoDB and Redis (for /new)."""
+        try:
+            await self._redis.delete(f"{REDIS_SESSION_PREFIX}{key}")
+        except Exception:
+            logger.warning("Failed to delete Redis cache for session {}", key)
+
+        try:
+            await self._messages_col.delete_many({"session_key": key})
+            await self._sessions_col.update_one(
+                {"_id": key},
+                {"$set": {"updated_at": datetime.now(), "metadata": {}}},
+            )
+        except Exception:
+            logger.warning("Failed to invalidate session {} in MongoDB", key)
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        """List all sessions (without messages) sorted by updated_at desc."""
+        cursor = self._sessions_col.find({}).sort("updated_at", -1)
+        sessions = []
+        async for doc in cursor:
+            sessions.append({
+                "key": doc["_id"],
+                "created_at": doc.get("created_at", ""),
+                "updated_at": doc.get("updated_at", ""),
+                "user_id": doc.get("user_id", ""),
+            })
+        return sessions
+
+    # -- static helpers --------------------------------------------------------
 
     @staticmethod
     def _extract_user_id(key: str) -> str:
-        """Extract user_id from session key for directory isolation.
+        """Extract user_id from session key for indexing.
 
         Key formats:
           api:{user_id}:{session_id}                 → user_id
@@ -129,7 +234,7 @@ class SessionManager:
         channel = parts[0]
 
         if channel == "api" and len(parts) >= 3:
-            return parts[1]  # api:{user_id}:{session_id}
+            return parts[1]
         if channel in ("telegram", "discord") and len(parts) >= 2:
             return parts[1]
         if channel == "cli":
@@ -137,151 +242,99 @@ class SessionManager:
         if channel == "cron":
             return "_system"
 
-        # Fallback: use second segment as user_id
         return parts[1] if len(parts) >= 2 else "_default"
 
-    def _get_session_path(self, key: str) -> Path:
-        """Get the file path for a session, organized by user_id."""
-        user_id = self._extract_user_id(key)
-        safe_user = safe_filename(user_id)
-        safe_key = safe_filename(key.replace(":", "_"))
-        user_dir = ensure_dir(self.sessions_dir / safe_user)
-        return user_dir / f"{safe_key}.jsonl"
+    # -- Redis helpers ---------------------------------------------------------
 
-    def _get_legacy_session_path(self, key: str) -> Path:
-        """Legacy global session path (~/.nanobot/sessions/)."""
-        safe_key = safe_filename(key.replace(":", "_"))
-        return self.legacy_sessions_dir / f"{safe_key}.jsonl"
-
-    def _get_flat_session_path(self, key: str) -> Path:
-        """Old flat session path (workspace/sessions/{key}.jsonl) for migration."""
-        safe_key = safe_filename(key.replace(":", "_"))
-        return self.sessions_dir / f"{safe_key}.jsonl"
-
-    def get_or_create(self, key: str) -> Session:
-        """
-        Get an existing session or create a new one.
-
-        Args:
-            key: Session key (usually channel:chat_id).
-
-        Returns:
-            The session.
-        """
-        if key in self._cache:
-            return self._cache[key]
-
-        session = self._load(key)
-        if session is None:
-            session = Session(key=key)
-
-        self._cache[key] = session
-        return session
-
-    def _load(self, key: str) -> Session | None:
-        """Load a session from disk, migrating from legacy/flat paths if needed."""
-        path = self._get_session_path(key)
-        if not path.exists():
-            # Try flat session path (pre-user_id migration)
-            flat_path = self._get_flat_session_path(key)
-            if flat_path.exists() and flat_path != path:
-                try:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(flat_path), str(path))
-                    logger.info("Migrated session {} from flat to user_id path", key)
-                except Exception:
-                    logger.exception("Failed to migrate session {} from flat path", key)
-
-        if not path.exists():
-            # Try legacy global path (~/.nanobot/sessions/)
-            legacy_path = self._get_legacy_session_path(key)
-            if legacy_path.exists():
-                try:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(legacy_path), str(path))
-                    logger.info("Migrated session {} from legacy path", key)
-                except Exception:
-                    logger.exception("Failed to migrate session {}", key)
-
-        if not path.exists():
-            return None
-
+    async def _write_redis(self, session: Session) -> None:
+        """Write session to Redis with TTL."""
+        redis_key = f"{REDIS_SESSION_PREFIX}{session.key}"
+        doc = {
+            "_id": session.key,
+            "user_id": self._extract_user_id(session.key),
+            "messages": session.messages,
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "metadata": session.metadata,
+            "_persisted_count": len(session.messages),
+        }
         try:
-            messages = []
-            metadata = {}
-            created_at = None
+            await self._redis.set(
+                redis_key,
+                json.dumps(doc, ensure_ascii=False),
+                ex=REDIS_SESSION_TTL,
+            )
+        except Exception:
+            logger.warning("Failed to write session {} to Redis", session.key)
 
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
+    async def _load_from_redis(self, key: str) -> Session | None:
+        """Try to load session from Redis cache."""
+        redis_key = f"{REDIS_SESSION_PREFIX}{key}"
+        try:
+            raw = await self._redis.get(redis_key)
+            if raw:
+                doc = json.loads(raw)
+                return self._doc_to_session(doc)
+        except Exception:
+            logger.warning("Failed to read session {} from Redis", key)
+        return None
 
-                    data = json.loads(line)
+    # -- MongoDB helpers -------------------------------------------------------
 
-                    if data.get("_type") == "metadata":
-                        metadata = data.get("metadata", {})
-                        created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
-                    else:
-                        messages.append(data)
+    async def _load_from_mongo(self, key: str) -> Session | None:
+        """Try to load session from MongoDB (dual-collection)."""
+        try:
+            meta_doc = await self._sessions_col.find_one({"_id": key})
+            if not meta_doc:
+                return None
 
-            return Session(
+            # Load all messages sorted by seq
+            messages: list[dict[str, Any]] = []
+            cursor = self._messages_col.find(
+                {"session_key": key},
+            ).sort("seq", 1)
+            async for msg_doc in cursor:
+                # Strip MongoDB-internal fields
+                msg_doc.pop("_id", None)
+                msg_doc.pop("session_key", None)
+                msg_doc.pop("seq", None)
+                messages.append(msg_doc)
+
+            created = meta_doc.get("created_at")
+            updated = meta_doc.get("updated_at")
+            if isinstance(created, str):
+                created = datetime.fromisoformat(created)
+            if isinstance(updated, str):
+                updated = datetime.fromisoformat(updated)
+
+            session = Session(
                 key=key,
                 messages=messages,
-                created_at=created_at or datetime.now(),
-                metadata=metadata,
+                created_at=created or datetime.now(),
+                updated_at=updated or datetime.now(),
+                metadata=meta_doc.get("metadata", {}),
+                _persisted_count=len(messages),
             )
-        except Exception as e:
-            logger.warning("Failed to load session {}: {}", key, e)
-            return None
+            return session
+        except Exception:
+            logger.warning("Failed to load session {} from MongoDB", key)
+        return None
 
-    def save(self, session: Session) -> None:
-        """Save a session to disk."""
-        path = self._get_session_path(session.key)
-
-        with open(path, "w", encoding="utf-8") as f:
-            metadata_line = {
-                "_type": "metadata",
-                "key": session.key,
-                "created_at": session.created_at.isoformat(),
-                "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata,
-            }
-            f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
-            for msg in session.messages:
-                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
-
-        self._cache[session.key] = session
-
-    def invalidate(self, key: str) -> None:
-        """Remove a session from the in-memory cache."""
-        self._cache.pop(key, None)
-
-    def list_sessions(self) -> list[dict[str, Any]]:
-        """
-        List all sessions across all user_id directories.
-
-        Returns:
-            List of session info dicts.
-        """
-        sessions = []
-
-        for path in self.sessions_dir.glob("*/*.jsonl"):
-            try:
-                with open(path, encoding="utf-8") as f:
-                    first_line = f.readline().strip()
-                    if first_line:
-                        data = json.loads(first_line)
-                        if data.get("_type") == "metadata":
-                            key = data.get("key") or path.stem.replace("_", ":", 1)
-                            sessions.append({
-                                "key": key,
-                                "created_at": data.get("created_at"),
-                                "updated_at": data.get("updated_at"),
-                                "path": str(path),
-                                "user_id": path.parent.name,
-                            })
-            except Exception:
-                continue
-
-        return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)
+    @staticmethod
+    def _doc_to_session(doc: dict) -> Session:
+        """Convert a Redis-cached document back to Session."""
+        created = doc.get("created_at")
+        updated = doc.get("updated_at")
+        if isinstance(created, str):
+            created = datetime.fromisoformat(created)
+        if isinstance(updated, str):
+            updated = datetime.fromisoformat(updated)
+        messages = doc.get("messages", [])
+        return Session(
+            key=doc["_id"],
+            messages=messages,
+            created_at=created or datetime.now(),
+            updated_at=updated or datetime.now(),
+            metadata=doc.get("metadata", {}),
+            _persisted_count=doc.get("_persisted_count", len(messages)),
+        )
