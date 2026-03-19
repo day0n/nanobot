@@ -460,6 +460,42 @@
 
 ID 格式：`{nodeType}-{timestamp}-{nanoid(6)}`
 
+### position 规则
+
+- `position` 是节点左上角的画布坐标，不是节点中心点。
+- 顶层节点直接使用绝对坐标：
+```json
+{ "x": 500, "y": 100 }
+```
+- `x` 和 `y` 必须是有限数字：
+  - 可以是整数或小数
+  - 不可以是字符串、`null`、`NaN`、`Infinity`
+- 普通节点不要额外传 `measured`、`width`、`height`、`style.width`、`style.height`
+  - 前端会自行测量
+  - publisher 当前真正硬校验的是 `position.x/y`
+- 如果节点有 `parentId`，其 `position` 才表示相对父节点坐标；默认搭流不要生成这种结构，除非明确在做 `groupNode`
+
+### 现有画布编辑时的坐标策略
+
+- 未修改节点：保留原始 `position`
+- 只改 prompt / model / data：保留原始 `position`
+- 新增节点：
+  - 接在锚点后面：`x = anchor.x + 460 ~ 520`
+  - 接在下一执行列：继续 `+520`
+  - 作为并行分支：与锚点的下游节点同列，改 `y`
+- 删除节点或删边时：不要顺手改无关节点坐标
+
+### 安全间距建议
+
+- 输入节点宽度通常约 `300`
+- 普通执行节点宽度通常约 `360`
+- 因此横向安全间距建议：
+  - 输入列 -> 第一执行列：`460 ~ 520`
+  - 执行列 -> 执行列：`520`
+- 纵向安全间距建议：
+  - 普通节点：至少 `320 ~ 420`
+  - 高节点（如 `relight`、`imageAngleControl`）：至少 `520`
+
 ### Edge
 
 ```json
@@ -479,6 +515,14 @@ ID 格式：`customEdge-{sourceId}-{targetId}-{sourceHandle}-{targetHandle}`
 
 ## 10) 布局建议（DAG）
 
-- `x = 100 + layer * 400`
-- `y = 100 + indexInLayer * 300`
-- `layer` 从输入节点开始向右递增
+- 先保留现有画布的原始坐标，不要无故整体重排
+- 新增节点时再按列补位
+- 推荐从左到右布局：
+  - 输入列 `x = baseX`
+  - 第一执行列 `x = baseX + 460 ~ 520`
+  - 后续执行列继续 `+520`
+- 推荐从上到下展开分支：
+  - `y = anchorY + n * gapY`
+  - 普通 `gapY` 用 `320 ~ 420`
+  - 高节点 `gapY` 用 `520`
+- `layer` 从输入节点开始向右递增；同层多节点优先纵向错开
