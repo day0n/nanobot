@@ -33,15 +33,80 @@ description: 在当前画布中编辑 OpenCreator 工作流
 9. 执行节点必须有合法 `selectedModels`（输入节点除外）。
 10. `groupNode`、`stickyNodesNode`、`assembleNow` 是不可执行节点，不参与自动执行链路。
 11. 替换或新增 `selectedModels` 时，必须同步更新 `modelConfigs`。
+12. 缺失关键素材时，不要硬搭流，必须先追问用户补齐。
+13. 口播广告、多分镜、多图集这类非平凡场景，禁止直接套最小模板，必须先做业务反推。
+
+## 业务模式约束
+
+- 口播广告 / UGC 场景：
+  - 必须先有共享语义层，先统一卖点、人群、语气，再分视觉分支和音频分支。
+  - 不要一上来就直接 `imageAudioToVideo` 或 `videoLipSync`。
+- 对口型场景：
+  - 用户已有视频时，优先 `videoLipSync`
+  - 用户只有图片且速度优先时，优先 `imageAudioToVideo`
+  - 用户只有图片但明确需要镜头运动时，优先 `videoMaker -> videoLipSync`
+- 多图 / 组图 / 分镜场景：
+  - 默认先走 `textGenerator -> scriptSplit -> 按条执行`
+  - 除非用户明确只要单张图，否则不要直接用一个 `imageMaker` 覆盖整组需求
+- 已有画布修改场景：
+  - 未修改节点尽量保留原位置与原连线
+  - 只对受影响区域做增删改，不要无故重做整图
+
+## 场景分析与反推搭流
+
+搭流时不要先想“套哪个模板”，而是先从最终产物反推：
+
+1. 理解用户目标：
+  - 最终产物是什么：文本 / 图片 / 视频 / 音频 / 多图集 / 口播广告
+  - 用户已有素材是什么：文本、产品图、人物图、视频、音频、参考风格
+  - 用户偏好：速度优先 / 质量优先 / 成本优先
+2. 从最终产物反推所需能力：
+  - 对口型：需要图片+音频+文本，或视频+音频
+  - 多图集：需要先规划多张图的职能，再拆分为单图任务
+  - 口播广告：需要共享语义层，再分视觉分支和音频分支，最后融合
+3. 逐层往前推每个原子的输入来源：
+  - 输入是用户直接提供
+  - 还是前置节点生成
+4. 发现关键输入缺失时，立刻追问，不要继续脑补。
+5. 先确定抽象结构，再选节点、选模型、写 prompt。
+6. 对已有画布的修改，先识别哪些节点必须保留，哪些节点需要新增/替换/删除，再生成整图。
+
+## 场景决策速查
+
+- 对口型场景：
+  - 用户有现成视频，且重点是“视频说话”时，优先 `videoLipSync`
+  - 用户只有人物/产品图，想快速产出，优先 `imageAudioToVideo`
+  - 用户只有图，但还想要镜头运动或更强动态，再考虑 `videoMaker -> videoLipSync`
+- 组图场景（如亚马逊 listing、多图海报、多分镜图）：
+  - 标准结构优先是 `textGenerator -> scriptSplit -> 按条生图`
+  - 不要直接一个 `textInput -> imageMaker` 企图生成整组图
+- 口播广告场景：
+  - 先做共享语义层（产品卖点/人群/情绪）
+  - 再拆视觉分支和音频分支
+  - 最后在对口型/融合节点合并
+- 端到端场景：
+  - 如果某个模型可直接产出最终结果，可简化链路
+  - 但只有在它能稳定满足用户目标时才这样做，不要为了省节点牺牲可控性
+- 已有画布编辑场景：
+  - 优先识别可复用节点，而不是全部推倒重来
+  - 只要用户没有明确要求整理画布，就尽量保留既有位置布局
 
 ## 编辑步骤
 
 1. 先调用 `get_workflow`，拿到当前画布的完整 `nodes/edges/position`，把它当作唯一真实状态。
-2. 基于用户目标给出一个清晰链路（`A -> B -> C`）。
-3. 在现有工作流上生成完整更新后的 `nodes`，**每个节点必须包含 position**；未修改的节点尽量保留原位置。
-4. 按 pin 规则生成完整更新后的 `edges`。
-5. 调用前检查（见下方 checklist）。
-6. 通过 `edit_workflow` 工具保存到当前画布。
+2. 用“场景分析与反推搭流”流程确定抽象结构，先回答：最终产物需要哪些原子能力，它们的输入从哪里来。
+3. **必读** `{skill_dir}/references/prompt-and-workflow-patterns.md`
+  - 任何非平凡工作流在确定结构前都必须读，重点是第四章高级工作流结构模板。
+4. **必读** `{skill_dir}/references/model-guide.md`
+  - 在给执行节点选择模型前必须读，不能只靠默认模型拍脑袋决定。
+5. 按需读取 `{skill_dir}/references/node-configs.md`
+  - 在填写 node data、handle、modelConfigs、连接限制时读取。
+6. 如果用户缺失必须素材（如做对口型但没有音频，做商品图但没有产品描述），先追问，不要继续调用保存工具。
+7. 在现有工作流上生成完整更新后的 `nodes`，未修改的节点尽量保留原位置；新增节点必须给出合理 `position`。
+8. 按 pin 规则生成完整更新后的 `edges`。
+9. 对复杂场景，优先让 prompt/脚本节点承担“规划”和“拆分”职责，不要把业务结构压缩成单个执行节点。
+10. 调用前检查（见下方 checklist）。
+11. 通过 `edit_workflow` 工具保存到当前画布。
 
 ## 调用前 Checklist
 
@@ -58,22 +123,11 @@ description: 在当前画布中编辑 OpenCreator 工作流
 4. 句柄类型匹配，且不超过连接上限。
 5. 建边前 4 项校验：不自连、类型兼容、目标 Pin 未超最大连线数、无环。
 
-## 常用模板
+## 必读参考（按阶段读取）
 
-- 文生图：`textInput -> imageMaker`
-- 文生视频：`textInput -> textToVideo`
-- 图生视频：`textInput -> imageMaker -> videoMaker`
-- 分镜视频：`textInput -> textGenerator -> scriptSplit -> imageMaker -> videoMaker`
-- 视频改造：`videoInput + textInput -> videoToVideo -> videoUpscaler`
-- 口播视频：`textInput -> textToSpeech`, `videoInput + audio -> videoLipSync`
-
-## 进阶参考（按需读取）
-
-根据构建需要，读取对应参考文件：
-
-- 需要选模型、设参数时：
-`{skill_dir}/references/model-guide.md`
-- 需要填写 inputText 或搭建复杂工作流结构时：
+- 搭抽象结构阶段：
 `{skill_dir}/references/prompt-and-workflow-patterns.md`
-- 节点结构、句柄、连线等基础契约：
+- 选模型阶段：
+`{skill_dir}/references/model-guide.md`
+- 填写节点 data / handle / modelConfigs 阶段：
 `{skill_dir}/references/node-configs.md`
