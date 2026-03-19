@@ -156,6 +156,9 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             else f"api:{auth_user.user_id}:{body.session_id}"
         )
         metadata = {"flow_id": flow_id} if flow_id else None
+        # 组装请求级私有上下文 (Private Context)
+        # 该对象利用 ContextVar 贯穿 Agent 的执行链路，避免敏感参数直接暴露在发给大语言模型的 Prompt 中，
+        # 并方便底层的各种 Tools（如 CreateWorkflowTool）无感获取用户身份、环境参量等执行上下文。
         private_context = {
             "auth_token": auth_user.token,
             "flow_id": flow_id,
