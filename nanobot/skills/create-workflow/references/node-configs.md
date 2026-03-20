@@ -492,9 +492,20 @@ ID 格式：`{nodeType}-{timestamp}-{nanoid(6)}`
 - 因此横向安全间距建议：
   - 输入列 -> 第一执行列：`460 ~ 520`
   - 执行列 -> 执行列：`520`
-- 纵向安全间距建议：
-  - 普通节点：至少 `320 ~ 420`
-  - 高节点（如 `relight`、`imageAngleControl`）：至少 `520`
+- 纵向间距必须基于节点实际高度：
+  - `get_workflow` 返回的每个节点都有 `measured.height`，这是前端渲染后的真实像素高度
+  - 同列相邻节点的 y 间距 = 上方节点的 `measured.height` + 间隙（建议 `60 ~ 100`）
+  - 即：`nextY = currentY + currentNode.measured.height + 80`
+  - 不要使用固定间距（如 300、400），因为节点高度差异极大（从 244px 到 927px）
+- 常见节点高度参考（仅供新建工作流无 measured 数据时估算）：
+  - `textInput`：约 `250`
+  - `videoMaker`：约 `300`
+  - `assembleNow`：约 `460`
+  - `scriptSplit`：约 `800`
+  - `musicGenerator`：约 `860`
+  - `textGenerator`、`textToSpeech`：约 `880`
+  - `imageMaker`：约 `930`
+  - 新建时无 measured 数据，用上述估算值 + 80 间隙计算 y
 
 ### Edge
 
@@ -515,14 +526,32 @@ ID 格式：`customEdge-{sourceId}-{targetId}-{sourceHandle}-{targetHandle}`
 
 ## 10) 布局建议（DAG）
 
+### 新增节点（非整理场景）
+
 - 先保留现有画布的原始坐标，不要无故整体重排
 - 新增节点时再按列补位
 - 推荐从左到右布局：
   - 输入列 `x = baseX`
   - 第一执行列 `x = baseX + 460 ~ 520`
   - 后续执行列继续 `+520`
-- 推荐从上到下展开分支：
-  - `y = anchorY + n * gapY`
-  - 普通 `gapY` 用 `320 ~ 420`
-  - 高节点 `gapY` 用 `520`
+- 同列多节点纵向排布时，必须基于 `measured.height` 计算：
+  - `nextNodeY = prevNodeY + prevNode.measured.height + 80`
+  - 没有 measured 数据时，用"安全间距建议"中的估算高度
 - `layer` 从输入节点开始向右递增；同层多节点优先纵向错开
+
+### 整理布局场景
+
+当用户明确要求"整理布局"、"排列整齐"、"重新排版"时：
+
+1. 先调用 `get_workflow`，记录每个节点的 `measured.width` 和 `measured.height`
+2. 按 DAG 拓扑分层（layer），从左到右排列：
+   - 入度为 0 的节点在第 0 层
+   - 其余节点的层 = max(所有前驱节点的层) + 1
+3. 计算每层的 x 坐标：
+   - `layerX = baseX + 累计前面各层的 maxWidth + 每层间隙 120`
+   - 即每层 x = 前一层 x + 前一层最宽节点的 `measured.width` + 120
+4. 计算同层内各节点的 y 坐标：
+   - 同层节点按连线关系排序（尽量让有连线的节点靠近）
+   - `nextY = prevY + prevNode.measured.height + 80`
+5. 全局 y 对齐：让整个图的纵向重心居中，避免偏向一侧
+6. 关键原则：**永远不要用固定 y 间距（如 300px），必须用 measured.height + 间隙来计算**
