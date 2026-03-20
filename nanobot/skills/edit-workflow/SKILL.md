@@ -1,15 +1,15 @@
 ---
-name: create-workflow
+name: edit-workflow
 description: 在当前画布中编辑 OpenCreator 工作流
 ---
 
 # 编辑 OpenCreator 工作流
 
-当用户在画布聊天中要求创建或修改工作流时，使用本 skill。
+当用户在画布聊天中要求修改工作流时，使用本 skill。
 
 ## 触发条件
 
-- 用户要求"帮我搭一个工作流"、"创建一个文生图流程"等
+- 用户要求"帮我搭一个工作流"、"加几个节点"、"改一下流程"等
 - 用户要求修改当前画布中的工作流
 
 如果用户只是问建议或询问节点用法，不要直接调用 `edit_workflow`。
