@@ -8,8 +8,8 @@ New schema (opencreator_agent database):
   - ``agent_tool_traces`` — one document per tool call execution.
 
 Redis cache:
-  - ``nanobot:session:meta:{session_id}`` — session metadata JSON (24h TTL).
-  - ``nanobot:session:ctx:{session_id}`` — full message list JSON for LLM context (24h TTL).
+  - ``agent:session:meta:{session_id}`` — session metadata JSON (24h TTL).
+  - ``agent:session:ctx:{session_id}`` — full message list JSON for LLM context (24h TTL).
 """
 
 import json
@@ -366,7 +366,7 @@ class SessionManager:
                 "role": {"$in": ["user", "agent"]},
                 "turn": {"$in": turn_numbers},
             },
-        ).sort("turn", -1).sort("seq", 1)
+        ).sort([("turn", -1), ("seq", 1)])
 
         messages = []
         async for doc in messages_cursor:

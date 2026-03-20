@@ -390,7 +390,9 @@ class AgentLoop:
                                     else ("cli", msg.chat_id))
                 logger.info("Processing system message from {}", msg.sender_id)
                 key = f"{channel}:{chat_id}"
-                session = await self.sessions.get_or_create(key)
+                session = await self.sessions.get_or_create(
+                    key, user_id=user_id, workflow_id=workflow_id, channel=channel,
+                )
                 self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
                 history = session.get_history(max_messages=0)
                 # Subagent results should be assistant role, other system messages use user role

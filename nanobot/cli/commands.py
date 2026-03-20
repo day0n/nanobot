@@ -463,7 +463,7 @@ def gateway(
     from nanobot.config.paths import get_cron_dir
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
-    from nanobot.database.mongo import init_mongo, test_mongo, ensure_indexes, agent_sessions_collection, agent_session_messages_collection
+    from nanobot.database.mongo import init_mongo, test_mongo, ensure_indexes, agent_sessions_col, agent_messages_col, agent_tool_traces_col
     from nanobot.database.redis import init_redis, test_redis, redis_client as get_redis_client
     from nanobot.heartbeat.service import HeartbeatService
     from nanobot.session.manager import SessionManager
@@ -480,13 +480,18 @@ def gateway(
     provider = _make_provider(config)
 
     # Initialize database connections (module-level singletons)
-    init_mongo(config.mongodb.uri, config.mongodb.db)
+    init_mongo(config.mongodb.uri, config.mongodb.db, config.mongodb.agent_db)
     init_redis(config.redis.host, config.redis.port, config.redis.password, config.redis.db, config.redis.ssl)
 
     # Create SessionManager synchronously (Motor/Redis clients don't do I/O at creation)
-    from nanobot.database.mongo import agent_sessions_collection, agent_session_messages_collection
+    from nanobot.database.mongo import agent_sessions_col, agent_messages_col, agent_tool_traces_col
     from nanobot.database.redis import redis_client
-    session_manager = SessionManager(agent_sessions_collection, agent_session_messages_collection, redis_client)
+    session_manager = SessionManager(
+        sessions_col=agent_sessions_col,
+        messages_col=agent_messages_col,
+        tool_traces_col=agent_tool_traces_col,
+        redis_client=redis_client,
+    )
 
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_cron_dir() / "jobs.json"
@@ -716,14 +721,19 @@ def agent(
     provider = _make_provider(config)
 
     # Initialize database connections
-    init_mongo(config.mongodb.uri, config.mongodb.db)
+    init_mongo(config.mongodb.uri, config.mongodb.db, config.mongodb.agent_db)
     init_redis(config.redis.host, config.redis.port, config.redis.password, config.redis.db, config.redis.ssl)
 
     # Create SessionManager synchronously (Motor/Redis clients don't do I/O at creation)
-    from nanobot.database.mongo import agent_sessions_collection, agent_session_messages_collection
+    from nanobot.database.mongo import agent_sessions_col, agent_messages_col, agent_tool_traces_col
     from nanobot.database.redis import redis_client
     from nanobot.session.manager import SessionManager
-    session_manager = SessionManager(agent_sessions_collection, agent_session_messages_collection, redis_client)
+    session_manager = SessionManager(
+        sessions_col=agent_sessions_col,
+        messages_col=agent_messages_col,
+        tool_traces_col=agent_tool_traces_col,
+        redis_client=redis_client,
+    )
 
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron_store_path = get_cron_dir() / "jobs.json"
