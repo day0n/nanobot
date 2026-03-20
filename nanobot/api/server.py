@@ -130,6 +130,8 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     )
 
     cfg = config
+    # Resolve summary model API key from providers config
+    _summary_key = (cfg.get_provider(cfg.agents.defaults.summary_model) or cfg.providers.openai).api_key or None
     agent = AgentLoop(
         bus=MessageBus(),
         provider=provider,
@@ -145,6 +147,8 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         session_manager=session_manager,
         mcp_servers=cfg.tools.mcp_servers,
         channels_config=cfg.channels,
+        summary_model=cfg.agents.defaults.summary_model,
+        summary_api_key=_summary_key,
     )
     app.state.agent = agent
 

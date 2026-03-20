@@ -66,6 +66,8 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        summary_model: str | None = None,
+        summary_api_key: str | None = None,
     ):
         from nanobot.config.schema import ApiServerConfig, ExecToolConfig, WebSearchConfig
 
@@ -74,6 +76,8 @@ class AgentLoop:
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
+        self._summary_model = summary_model
+        self._summary_api_key = summary_api_key
         self.max_iterations = max_iterations
         self.context_window_tokens = context_window_tokens
         self.web_search_config = web_search_config or WebSearchConfig()
@@ -620,7 +624,7 @@ class AgentLoop:
         self._schedule_background(self._generate_summary(session))
 
     async def _generate_summary(self, session: Session) -> None:
-        """Generate a summary title for the session via LLM (background task)."""
+        """Generate a summary title for the session via a lightweight LLM (background task)."""
         try:
             # Extract first user message and first assistant response
             first_user = first_assistant = None
@@ -641,17 +645,34 @@ class AgentLoop:
             if first_assistant:
                 context += f"\nAssistant: {first_assistant}"
 
-            response = await self.provider.chat_with_retry(
-                messages=[
-                    {"role": "system", "content": self._SUMMARY_PROMPT},
-                    {"role": "user", "content": context},
-                ],
-                model=self.model,
-                max_tokens=50,
-                temperature=0.7,
-            )
+            # Use dedicated summary model (gpt-4o-mini) if configured,
+            # otherwise fall back to the main provider.
+            if self._summary_model and self._summary_api_key:
+                from litellm import acompletion
 
-            summary = (response.content or "").strip()
+                resp = await acompletion(
+                    model=self._summary_model,
+                    messages=[
+                        {"role": "system", "content": self._SUMMARY_PROMPT},
+                        {"role": "user", "content": context},
+                    ],
+                    max_tokens=50,
+                    temperature=0.7,
+                    api_key=self._summary_api_key,
+                )
+                summary = (resp.choices[0].message.content or "").strip()
+            else:
+                response = await self.provider.chat_with_retry(
+                    messages=[
+                        {"role": "system", "content": self._SUMMARY_PROMPT},
+                        {"role": "user", "content": context},
+                    ],
+                    model=self.model,
+                    max_tokens=50,
+                    temperature=0.7,
+                )
+                summary = (response.content or "").strip()
+
             if summary:
                 session.summary = summary
                 await self.sessions.save_summary(session.session_id, summary)

@@ -498,6 +498,7 @@ def gateway(
     cron = CronService(cron_store_path)
 
     # Create agent with cron service and SessionManager
+    _summary_key = (config.get_provider(config.agents.defaults.summary_model) or config.providers.openai).api_key or None
     agent = AgentLoop(
         bus=bus,
         provider=provider,
@@ -514,6 +515,8 @@ def gateway(
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        summary_model=config.agents.defaults.summary_model,
+        summary_api_key=_summary_key,
     )
 
     # Set cron callback (needs agent)
@@ -744,6 +747,7 @@ def agent(
     else:
         logger.disable("nanobot")
 
+    _sk = (config.get_provider(config.agents.defaults.summary_model) or config.providers.openai).api_key or None
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -760,6 +764,8 @@ def agent(
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        summary_model=config.agents.defaults.summary_model,
+        summary_api_key=_sk,
     )
 
     async def _init_db_and_session_manager():
