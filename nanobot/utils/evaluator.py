@@ -38,7 +38,7 @@ _EVALUATE_TOOL = [
 ]
 
 _SYSTEM_PROMPT = (
-    "You are a notification gate for a background agent. "
+    "You are a notification gate for Creato. "
     "You will be given the original task and the agent's response. "
     "Call the evaluate_notification tool to decide whether the user "
     "should be notified.\n\n"

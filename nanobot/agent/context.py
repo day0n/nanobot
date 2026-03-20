@@ -66,9 +66,9 @@ Skills with available="false" need dependencies installed first - you can try in
 - Use file tools when they are simpler or more reliable than shell commands.
 """
 
-        return f"""# OpenCreator Agent
+        return f"""# Creato
 
-You are OpenCreator Agent, a helpful AI assistant.
+You are Creato, a helpful AI assistant.
 
 ## Runtime
 {runtime}
@@ -79,7 +79,7 @@ This is your runtime directory for file operations and session storage.
 
 {platform_policy}
 
-## OpenCreator Agent Guidelines
+## Creato Guidelines
 - State intent before tool calls, but NEVER predict or claim results before receiving them.
 - Only use the currently available tools: `read_file`, `web_search`, `web_fetch`, `spawn`, `get_workflow`, and `edit_workflow`.
 - Do not assume file-writing, shell, directory-listing, cron, message-sending, or MCP tools are available.
