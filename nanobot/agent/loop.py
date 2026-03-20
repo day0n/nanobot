@@ -107,6 +107,7 @@ class AgentLoop:
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._background_tasks: list[asyncio.Task] = []
         self._processing_lock = asyncio.Lock()
+        self._pending_traces: list[dict] = []  # tool traces accumulated during _save_turn
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -173,12 +174,18 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str], list[dict]]:
-        """Run the agent iteration loop."""
+    ) -> tuple[str | None, list[str], list[dict], dict[str, dict]]:
+        """Run the agent iteration loop.
+
+        Returns:
+            (final_content, tools_used, messages, tool_timings)
+            tool_timings maps tool_call_id -> {name, args, started_at, completed_at, duration_ms, error}
+        """
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        tool_timings: dict[str, dict] = {}
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -214,7 +221,27 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+
+                    from datetime import datetime as _dt
+                    started_at = _dt.now()
+                    error_msg = None
+                    try:
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    except Exception as e:
+                        error_msg = str(e)
+                        result = f"Error: {e}"
+                    completed_at = _dt.now()
+
+                    tool_timings[tool_call.id] = {
+                        "name": tool_call.name,
+                        "args": tool_call.arguments,
+                        "started_at": started_at,
+                        "completed_at": completed_at,
+                        "duration_ms": int((completed_at - started_at).total_seconds() * 1000),
+                        "error": error_msg,
+                        "raw_output": result,
+                    }
+
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
@@ -240,7 +267,7 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        return final_content, tools_used, messages
+        return final_content, tools_used, messages, tool_timings
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
@@ -348,6 +375,8 @@ class AgentLoop:
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         private_context: dict[str, Any] | None = None,
+        user_id: str = "",
+        workflow_id: str | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         ctx = dict(private_context or {})
@@ -372,9 +401,10 @@ class AgentLoop:
                     metadata=msg.metadata,
                     current_role=current_role,
                 )
-                final_content, _, all_msgs = await self._run_agent_loop(messages)
-                self._save_turn(session, all_msgs, 1 + len(history))
-                await self.sessions.save(session)
+                final_content, _, all_msgs, tool_timings = await self._run_agent_loop(messages)
+                self._save_turn(session, all_msgs, 1 + len(history), tool_timings)
+                await self.sessions.save(session, tool_traces=self._pending_traces)
+                self._pending_traces = []
                 self._maybe_generate_summary(session)
                 return OutboundMessage(channel=channel, chat_id=chat_id,
                                       content=final_content or "Background task completed.")
@@ -390,14 +420,16 @@ class AgentLoop:
             )
 
             key = session_key or msg.session_key
-            session = await self.sessions.get_or_create(key)
+            session = await self.sessions.get_or_create(
+                key, user_id=user_id, workflow_id=workflow_id, channel=msg.channel,
+            )
 
             # Slash commands
             cmd = msg.content.strip().lower()
             if cmd == "/new":
                 session.clear()
                 await self.sessions.save(session)
-                await self.sessions.invalidate(session.key)
+                await self.sessions.invalidate(session.session_id)
 
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                       content="New session started.")
@@ -435,15 +467,16 @@ class AgentLoop:
                     channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
                 ))
 
-            final_content, _, all_msgs = await self._run_agent_loop(
+            final_content, _, all_msgs, tool_timings = await self._run_agent_loop(
                 initial_messages, on_progress=on_progress or _bus_progress,
             )
 
             if final_content is None:
                 final_content = "I've completed processing but have no response to give."
 
-            self._save_turn(session, all_msgs, 1 + len(history))
-            await self.sessions.save(session)
+            self._save_turn(session, all_msgs, 1 + len(history), tool_timings)
+            await self.sessions.save(session, tool_traces=self._pending_traces)
+            self._pending_traces = []
             self._maybe_generate_summary(session)
 
             if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
@@ -465,19 +498,35 @@ class AgentLoop:
         finally:
             reset_request_context(request_ctx_token)
 
-    def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
-        """Save new-turn messages into session, truncating large tool results."""
+    def _save_turn(self, session: Session, messages: list[dict], skip: int, tool_timings: dict[str, dict] | None = None) -> None:
+        """Save new-turn messages into session, splitting into display/LLM/trace roles.
+
+        Roles written to session.messages:
+          - "user"      — user message (display + LLM context)
+          - "agent"     — final assistant reply (display + LLM context, mapped to "assistant" for LLM)
+          - "assistant" — intermediate assistant with tool_calls (LLM context only)
+          - "tool"      — tool result (LLM context only, truncated)
+
+        Also builds tool_traces list into self._pending_traces for SessionManager.save().
+        """
         from datetime import datetime
+
+        tool_timings = tool_timings or {}
+        turn = session.turn_count + 1
+        tool_hints: list[str] = []
+        display_count = 0
+
         for m in messages[skip:]:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
+
+            # Skip empty assistant messages — they poison session context
             if role == "assistant" and not content and not entry.get("tool_calls"):
-                continue  # skip empty assistant messages — they poison session context
-            if role == "tool" and isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
-                entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
-            elif role == "user":
+                continue
+
+            # --- User message cleanup ---
+            if role == "user":
                 if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
-                    # Strip the runtime-context prefix, keep only the user text.
                     parts = content.split("\n\n", 1)
                     if len(parts) > 1 and parts[1].strip():
                         entry["content"] = parts[1]
@@ -487,7 +536,7 @@ class AgentLoop:
                     filtered = []
                     for c in content:
                         if c.get("type") == "text" and isinstance(c.get("text"), str) and c["text"].startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
-                            continue  # Strip runtime context from multimodal messages
+                            continue
                         if (c.get("type") == "image_url"
                                 and c.get("image_url", {}).get("url", "").startswith("data:image/")):
                             path = (c.get("_meta") or {}).get("path", "")
@@ -498,8 +547,62 @@ class AgentLoop:
                     if not filtered:
                         continue
                     entry["content"] = filtered
-            entry.setdefault("timestamp", datetime.now().isoformat())
+                entry["turn"] = turn
+                display_count += 1
+
+            # --- Assistant with tool_calls (intermediate, LLM context only) ---
+            elif role == "assistant" and entry.get("tool_calls"):
+                # Accumulate tool hints for the final agent message
+                for tc in entry.get("tool_calls") or []:
+                    func = tc.get("function", {})
+                    name = func.get("name", "unknown")
+                    tool_hints.append(f"{name}()")
+                entry["turn"] = turn
+
+            # --- Assistant without tool_calls (final reply → rename to "agent") ---
+            elif role == "assistant" and not entry.get("tool_calls"):
+                entry["role"] = "agent"
+                entry["turn"] = turn
+                if tool_hints:
+                    entry["tool_hints"] = list(tool_hints)
+                display_count += 1
+                # Update session preview
+                if isinstance(entry.get("content"), str):
+                    session.last_message_preview = entry["content"][:120]
+
+            # --- Tool result (LLM context only, truncated) ---
+            elif role == "tool":
+                if isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
+                    entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
+                entry["turn"] = turn
+
+                # Build tool trace document
+                tcid = entry.get("tool_call_id", "")
+                timing = tool_timings.get(tcid, {})
+                if timing:
+                    raw_output = timing.get("raw_output", content)
+                    output_str = raw_output if isinstance(raw_output, str) else str(raw_output)
+                    self._pending_traces.append({
+                        "session_id": session.session_id,
+                        "turn": turn,
+                        "tool_call_id": tcid,
+                        "tool_name": timing.get("name", entry.get("name", "unknown")),
+                        "input": timing.get("args", {}),
+                        "output": output_str[:65536],  # cap at 64KB
+                        "output_size_bytes": len(output_str.encode("utf-8", errors="replace")),
+                        "status": "error" if timing.get("error") else "success",
+                        "error": timing.get("error"),
+                        "duration_ms": timing.get("duration_ms", 0),
+                        "started_at": timing.get("started_at"),
+                        "completed_at": timing.get("completed_at"),
+                    })
+
+            entry.setdefault("created_at", datetime.now().isoformat())
             session.messages.append(entry)
+
+        # Update session counters
+        session.message_count += display_count
+        session.turn_count = turn
         session.updated_at = datetime.now()
 
     _SUMMARY_PROMPT = (
@@ -524,7 +627,7 @@ class AgentLoop:
                 content = m.get("content")
                 if role == "user" and not first_user and isinstance(content, str):
                     first_user = content[:500]
-                elif role == "assistant" and not first_assistant and isinstance(content, str):
+                elif role in ("assistant", "agent") and not first_assistant and isinstance(content, str):
                     first_assistant = content[:500]
                 if first_user and first_assistant:
                     break
@@ -549,10 +652,10 @@ class AgentLoop:
             summary = (response.content or "").strip()
             if summary:
                 session.summary = summary
-                await self.sessions.save_summary(session.key, summary)
-                logger.debug("Generated summary for session {}: {}", session.key, summary)
+                await self.sessions.save_summary(session.session_id, summary)
+                logger.debug("Generated summary for session {}: {}", session.session_id, summary)
         except Exception:
-            logger.warning("Failed to generate summary for session {}", session.key)
+            logger.warning("Failed to generate summary for session {}", session.session_id)
 
     async def process_direct(
         self,
@@ -563,6 +666,8 @@ class AgentLoop:
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         metadata: dict[str, Any] | None = None,
         private_context: dict[str, Any] | None = None,
+        user_id: str = "",
+        workflow_id: str | None = None,
     ) -> str:
         """Process a message directly (for CLI or cron usage)."""
         await self._connect_mcp()
@@ -578,5 +683,7 @@ class AgentLoop:
             session_key=session_key,
             on_progress=on_progress,
             private_context=private_context,
+            user_id=user_id,
+            workflow_id=workflow_id,
         )
         return response.content if response else ""

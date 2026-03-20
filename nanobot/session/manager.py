@@ -2,12 +2,14 @@
 
 Persistence: MongoDB (primary) + Redis (cache layer).
 
-Schema:
-  - ``agent_sessions`` — one document per session (metadata only, no messages).
-  - ``agent_session_messages`` — one document per message, append-only.
+New schema (opencreator_agent database):
+  - ``agent_sessions`` — one document per session (metadata only).
+  - ``agent_messages`` — one document per message, append-only, all roles.
+  - ``agent_tool_traces`` — one document per tool call execution.
 
-Write path is append-only: only newly added messages are ``insert_many``-ed.
-Read path: Redis cache → MongoDB (dual-collection query) → create new.
+Redis cache:
+  - ``nanobot:session:meta:{session_id}`` — session metadata JSON (24h TTL).
+  - ``nanobot:session:ctx:{session_id}`` — full message list JSON for LLM context (24h TTL).
 """
 
 import json
@@ -18,8 +20,9 @@ from typing import Any
 from loguru import logger
 
 
-REDIS_SESSION_PREFIX = "nanobot:session:"
-REDIS_SESSION_TTL = 60 * 60 * 24  # 24 hours
+REDIS_META_PREFIX = "agent:session:meta:"
+REDIS_CTX_PREFIX = "agent:session:ctx:"
+REDIS_TTL = 60 * 60 * 24  # 24 hours
 
 
 @dataclass
@@ -30,24 +33,19 @@ class Session:
     Important: Messages are append-only for LLM cache efficiency.
     """
 
-    key: str  # channel:chat_id
+    session_id: str
+    user_id: str
+    workflow_id: str | None = None
+    channel: str = "api"
     messages: list[dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
-    metadata: dict[str, Any] = field(default_factory=dict)
     summary: str | None = field(default=None)
+    message_count: int = 0       # user + agent display messages only
+    turn_count: int = 0          # total turns
+    last_message_preview: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     _persisted_count: int = field(default=0, repr=False)
-
-    def add_message(self, role: str, content: str, **kwargs: Any) -> None:
-        """Add a message to the session."""
-        msg = {
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now().isoformat(),
-            **kwargs
-        }
-        self.messages.append(msg)
-        self.updated_at = datetime.now()
 
     @staticmethod
     def _find_legal_start(messages: list[dict[str, Any]]) -> int:
@@ -56,7 +54,7 @@ class Session:
         start = 0
         for i, msg in enumerate(messages):
             role = msg.get("role")
-            if role == "assistant":
+            if role in ("assistant", "agent"):
                 for tc in msg.get("tool_calls") or []:
                     if isinstance(tc, dict) and tc.get("id"):
                         declared.add(str(tc["id"]))
@@ -66,14 +64,18 @@ class Session:
                     start = i + 1
                     declared.clear()
                     for prev in messages[start:i + 1]:
-                        if prev.get("role") == "assistant":
+                        if prev.get("role") in ("assistant", "agent"):
                             for tc in prev.get("tool_calls") or []:
                                 if isinstance(tc, dict) and tc.get("id"):
                                     declared.add(str(tc["id"]))
         return start
 
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
-        """Return messages for LLM input, aligned to a legal tool-call boundary."""
+        """Return messages for LLM input, aligned to a legal tool-call boundary.
+
+        Note: For LLM context, ``agent`` role messages are mapped back to ``assistant``
+        since LLM APIs expect the standard ``assistant`` role.
+        """
         sliced = self.messages[-max_messages:] if max_messages > 0 else list(self.messages)
 
         # Drop leading non-user messages to avoid starting mid-turn when possible.
@@ -90,7 +92,11 @@ class Session:
 
         out: list[dict[str, Any]] = []
         for m in sliced:
-            entry: dict[str, Any] = {"role": m["role"], "content": m.get("content", "")}
+            role = m["role"]
+            # Map "agent" back to "assistant" for LLM API compatibility
+            if role == "agent":
+                role = "assistant"
+            entry: dict[str, Any] = {"role": role, "content": m.get("content", "")}
             for k in ("tool_calls", "tool_call_id", "name", "thinking_blocks", "reasoning_content"):
                 if k in m:
                     entry[k] = m[k]
@@ -102,6 +108,9 @@ class Session:
         self.messages = []
         self._persisted_count = 0
         self.summary = None
+        self.message_count = 0
+        self.turn_count = 0
+        self.last_message_preview = None
         self.updated_at = datetime.now()
 
 
@@ -113,52 +122,95 @@ class SessionManager:
     """
     Manages conversation sessions with MongoDB + Redis.
 
-    Read path:  Redis → MongoDB → create new
-    Write path: append-only insert_many (new messages) + update_one (metadata) + Redis SET
+    Uses the new three-collection schema in opencreator_agent database:
+      - agent_sessions: session metadata
+      - agent_messages: all messages (user/agent/assistant/tool)
+      - agent_tool_traces: tool execution traces
+
+    Read path:  Redis ctx → MongoDB agent_messages → create new
+    Write path: insert_many (new messages) + insert_many (traces) + update_one (session) + Redis SET
     """
 
-    def __init__(self, mongo_sessions_col, mongo_messages_col, redis_client) -> None:
-        self._sessions_col = mongo_sessions_col
-        self._messages_col = mongo_messages_col
+    def __init__(
+        self,
+        sessions_col,
+        messages_col,
+        tool_traces_col,
+        redis_client,
+        # Legacy collections (kept for backward compat, can be None)
+        legacy_sessions_col=None,
+        legacy_messages_col=None,
+    ) -> None:
+        self._sessions_col = sessions_col
+        self._messages_col = messages_col
+        self._traces_col = tool_traces_col
         self._redis = redis_client
+        # Legacy (unused in new code paths, kept for gradual migration)
+        self._legacy_sessions_col = legacy_sessions_col
+        self._legacy_messages_col = legacy_messages_col
 
     # -- public API (all async) ------------------------------------------------
 
-    async def get_or_create(self, key: str) -> Session:
+    async def get_or_create(
+        self,
+        session_id: str,
+        user_id: str = "",
+        workflow_id: str | None = None,
+        channel: str = "api",
+    ) -> Session:
         """Get an existing session or create a new one."""
-        # 1. Redis cache
-        session = await self._load_from_redis(key)
+        # 1. Redis cache (ctx key has full messages)
+        session = await self._load_from_redis(session_id)
         if session is not None:
             return session
 
-        # 2. MongoDB (dual-collection)
-        session = await self._load_from_mongo(key)
+        # 2. MongoDB (new agent database)
+        session = await self._load_from_mongo(session_id)
         if session is not None:
             # Warm Redis cache
             await self._write_redis(session)
             return session
 
         # 3. New session
-        session = Session(key=key)
+        session = Session(
+            session_id=session_id,
+            user_id=user_id,
+            workflow_id=workflow_id,
+            channel=channel,
+        )
         return session
 
-    async def save(self, session: Session) -> None:
-        """Persist new messages to MongoDB (append-only) and update Redis cache."""
+    async def save(
+        self,
+        session: Session,
+        tool_traces: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Persist new messages to MongoDB (append-only) and update Redis cache.
+
+        Args:
+            session: The session to save.
+            tool_traces: Optional list of tool trace documents to insert into agent_tool_traces.
+        """
         now = datetime.now()
         session.updated_at = now
         new_messages = session.messages[session._persisted_count:]
 
         try:
-            # Upsert session metadata (no messages stored here)
+            # Upsert session metadata
             set_fields: dict[str, Any] = {
-                "user_id": self._extract_user_id(session.key),
+                "user_id": session.user_id,
+                "workflow_id": session.workflow_id,
+                "channel": session.channel,
                 "updated_at": now,
+                "message_count": session.message_count,
+                "turn_count": session.turn_count,
+                "last_message_preview": session.last_message_preview,
                 "metadata": session.metadata,
             }
             if session.summary is not None:
                 set_fields["summary"] = session.summary
             await self._sessions_col.update_one(
-                {"_id": session.key},
+                {"_id": session.session_id},
                 {
                     "$set": set_fields,
                     "$setOnInsert": {
@@ -173,7 +225,7 @@ class SessionManager:
                 base_seq = session._persisted_count
                 docs = [
                     {
-                        "session_key": session.key,
+                        "session_id": session.session_id,
                         "seq": base_seq + i,
                         **msg,
                     }
@@ -181,150 +233,244 @@ class SessionManager:
                 ]
                 await self._messages_col.insert_many(docs, ordered=True)
                 session._persisted_count = len(session.messages)
+
+            # Insert tool traces
+            if tool_traces:
+                await self._traces_col.insert_many(tool_traces, ordered=False)
+
         except Exception:
-            logger.exception("Failed to save session {} to MongoDB", session.key)
+            logger.exception("Failed to save session {} to MongoDB", session.session_id)
             raise
 
         await self._write_redis(session)
 
-    async def invalidate(self, key: str) -> None:
+    async def invalidate(self, session_id: str) -> None:
         """Remove session messages from MongoDB and Redis (for /new)."""
         try:
-            await self._redis.delete(f"{REDIS_SESSION_PREFIX}{key}")
+            await self._redis.delete(f"{REDIS_CTX_PREFIX}{session_id}")
+            await self._redis.delete(f"{REDIS_META_PREFIX}{session_id}")
         except Exception:
-            logger.warning("Failed to delete Redis cache for session {}", key)
+            logger.warning("Failed to delete Redis cache for session {}", session_id)
 
         try:
-            await self._messages_col.delete_many({"session_key": key})
+            await self._messages_col.delete_many({"session_id": session_id})
+            await self._traces_col.delete_many({"session_id": session_id})
             await self._sessions_col.update_one(
-                {"_id": key},
-                {"$set": {"updated_at": datetime.now(), "metadata": {}, "summary": None}},
+                {"_id": session_id},
+                {"$set": {
+                    "updated_at": datetime.now(),
+                    "metadata": {},
+                    "summary": None,
+                    "message_count": 0,
+                    "turn_count": 0,
+                    "last_message_preview": None,
+                }},
             )
         except Exception:
-            logger.warning("Failed to invalidate session {} in MongoDB", key)
+            logger.warning("Failed to invalidate session {} in MongoDB", session_id)
 
-    async def list_sessions(self, user_id: str | None = None) -> list[dict[str, Any]]:
-        """List all sessions (without messages) sorted by updated_at desc."""
-        query: dict[str, Any] = {"user_id": user_id} if user_id else {}
-        cursor = self._sessions_col.find(query).sort("updated_at", -1)
+    async def list_sessions(
+        self,
+        user_id: str,
+        limit: int = 10,
+        before: datetime | None = None,
+    ) -> dict[str, Any]:
+        """List sessions for a user with cursor-based lazy loading.
+
+        Returns:
+            { "sessions": [...], "has_more": bool }
+        """
+        query: dict[str, Any] = {"user_id": user_id}
+        if before is not None:
+            query["updated_at"] = {"$lt": before}
+
+        cursor = self._sessions_col.find(query).sort("updated_at", -1).limit(limit + 1)
         sessions = []
         async for doc in cursor:
             sessions.append({
-                "key": doc["_id"],
+                "session_id": doc["_id"],
+                "user_id": doc.get("user_id", ""),
+                "workflow_id": doc.get("workflow_id"),
+                "channel": doc.get("channel", "api"),
+                "summary": doc.get("summary"),
+                "message_count": doc.get("message_count", 0),
+                "turn_count": doc.get("turn_count", 0),
+                "last_message_preview": doc.get("last_message_preview"),
                 "created_at": doc.get("created_at", ""),
                 "updated_at": doc.get("updated_at", ""),
-                "user_id": doc.get("user_id", ""),
-                "summary": doc.get("summary"),
             })
-        return sessions
 
-    async def save_summary(self, key: str, summary: str) -> None:
+        has_more = len(sessions) > limit
+        if has_more:
+            sessions = sessions[:limit]
+
+        return {"sessions": sessions, "has_more": has_more}
+
+    async def get_messages_page(
+        self,
+        session_id: str,
+        turns: int = 10,
+        before_turn: int | None = None,
+    ) -> dict[str, Any]:
+        """Get paginated messages for frontend display (user + agent only).
+
+        Args:
+            session_id: The session to query.
+            turns: Number of turns to return.
+            before_turn: Cursor — return turns before this turn number.
+
+        Returns:
+            { "messages": [...], "has_more": bool }
+        """
+        query: dict[str, Any] = {
+            "session_id": session_id,
+            "role": {"$in": ["user", "agent"]},
+        }
+        if before_turn is not None:
+            query["turn"] = {"$lt": before_turn}
+
+        # We need to find the distinct turn numbers first, then fetch messages for those turns.
+        # Use aggregation to get distinct turns, then fetch messages.
+        pipeline = [
+            {"$match": query},
+            {"$group": {"_id": "$turn"}},
+            {"$sort": {"_id": -1}},
+            {"$limit": turns + 1},  # +1 to check has_more
+        ]
+        turn_docs = await self._messages_col.aggregate(pipeline).to_list(length=turns + 1)
+        turn_numbers = [d["_id"] for d in turn_docs]
+
+        has_more = len(turn_numbers) > turns
+        if has_more:
+            turn_numbers = turn_numbers[:turns]
+
+        if not turn_numbers:
+            return {"messages": [], "has_more": False}
+
+        # Fetch all messages for these turns
+        messages_cursor = self._messages_col.find(
+            {
+                "session_id": session_id,
+                "role": {"$in": ["user", "agent"]},
+                "turn": {"$in": turn_numbers},
+            },
+        ).sort("turn", -1).sort("seq", 1)
+
+        messages = []
+        async for doc in messages_cursor:
+            doc.pop("_id", None)
+            doc.pop("session_id", None)
+            doc.pop("seq", None)
+            # Remove LLM-internal fields from display messages
+            doc.pop("tool_calls", None)
+            doc.pop("tool_call_id", None)
+            doc.pop("name", None)
+            messages.append(doc)
+
+        return {"messages": messages, "has_more": has_more}
+
+    async def save_summary(self, session_id: str, summary: str) -> None:
         """Update only the summary field (used by background generation)."""
         try:
             await self._sessions_col.update_one(
-                {"_id": key}, {"$set": {"summary": summary}},
+                {"_id": session_id}, {"$set": {"summary": summary}},
             )
-            # Update Redis cache if it exists
-            redis_key = f"{REDIS_SESSION_PREFIX}{key}"
-            raw = await self._redis.get(redis_key)
+            # Update Redis meta cache if it exists
+            meta_key = f"{REDIS_META_PREFIX}{session_id}"
+            raw = await self._redis.get(meta_key)
             if raw:
                 doc = json.loads(raw)
                 doc["summary"] = summary
                 await self._redis.set(
-                    redis_key,
+                    meta_key,
                     json.dumps(doc, ensure_ascii=False),
-                    ex=REDIS_SESSION_TTL,
+                    ex=REDIS_TTL,
                 )
         except Exception:
-            logger.warning("Failed to save summary for session {}", key)
-
-    # -- static helpers --------------------------------------------------------
-
-    @staticmethod
-    def _extract_user_id(key: str) -> str:
-        """Extract user_id from session key for indexing.
-
-        Key formats:
-          api:{user_id}:{session_id}                 → user_id
-          api:{user_id}:flow:{flow_id}:{session_id} → user_id
-          telegram:{user_id}          → user_id
-          discord:{user_id}           → user_id
-          cli:direct                  → _local
-          cron:{job_id}               → _system
-          heartbeat                   → _system
-          other                       → _default
-        """
-        if not key or ":" not in key:
-            return "_system" if key == "heartbeat" else "_default"
-
-        parts = key.split(":", 2)
-        channel = parts[0]
-
-        if channel == "api" and len(parts) >= 3:
-            return parts[1]
-        if channel in ("telegram", "discord") and len(parts) >= 2:
-            return parts[1]
-        if channel == "cli":
-            return "_local"
-        if channel == "cron":
-            return "_system"
-
-        return parts[1] if len(parts) >= 2 else "_default"
+            logger.warning("Failed to save summary for session {}", session_id)
 
     # -- Redis helpers ---------------------------------------------------------
 
     async def _write_redis(self, session: Session) -> None:
-        """Write session to Redis with TTL."""
-        redis_key = f"{REDIS_SESSION_PREFIX}{session.key}"
-        doc = {
-            "_id": session.key,
-            "user_id": self._extract_user_id(session.key),
-            "messages": session.messages,
+        """Write session metadata and LLM context to Redis."""
+        # Meta cache (lightweight)
+        meta_key = f"{REDIS_META_PREFIX}{session.session_id}"
+        meta_doc = {
+            "_id": session.session_id,
+            "user_id": session.user_id,
+            "workflow_id": session.workflow_id,
+            "channel": session.channel,
+            "summary": session.summary,
+            "message_count": session.message_count,
+            "turn_count": session.turn_count,
+            "last_message_preview": session.last_message_preview,
             "created_at": session.created_at.isoformat(),
             "updated_at": session.updated_at.isoformat(),
             "metadata": session.metadata,
+        }
+
+        # Context cache (full messages for LLM)
+        ctx_key = f"{REDIS_CTX_PREFIX}{session.session_id}"
+        ctx_doc = {
+            "_id": session.session_id,
+            "user_id": session.user_id,
+            "workflow_id": session.workflow_id,
+            "channel": session.channel,
+            "messages": session.messages,
             "summary": session.summary,
+            "message_count": session.message_count,
+            "turn_count": session.turn_count,
+            "last_message_preview": session.last_message_preview,
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "metadata": session.metadata,
             "_persisted_count": len(session.messages),
         }
+
         try:
             await self._redis.set(
-                redis_key,
-                json.dumps(doc, ensure_ascii=False),
-                ex=REDIS_SESSION_TTL,
+                meta_key,
+                json.dumps(meta_doc, ensure_ascii=False),
+                ex=REDIS_TTL,
+            )
+            await self._redis.set(
+                ctx_key,
+                json.dumps(ctx_doc, ensure_ascii=False),
+                ex=REDIS_TTL,
             )
         except Exception:
-            logger.warning("Failed to write session {} to Redis", session.key)
+            logger.warning("Failed to write session {} to Redis", session.session_id)
 
-    async def _load_from_redis(self, key: str) -> Session | None:
-        """Try to load session from Redis cache."""
-        redis_key = f"{REDIS_SESSION_PREFIX}{key}"
+    async def _load_from_redis(self, session_id: str) -> Session | None:
+        """Try to load session from Redis ctx cache."""
+        ctx_key = f"{REDIS_CTX_PREFIX}{session_id}"
         try:
-            raw = await self._redis.get(redis_key)
+            raw = await self._redis.get(ctx_key)
             if raw:
                 doc = json.loads(raw)
                 return self._doc_to_session(doc)
         except Exception:
-            logger.warning("Failed to read session {} from Redis", key)
+            logger.warning("Failed to read session {} from Redis", session_id)
         return None
 
     # -- MongoDB helpers -------------------------------------------------------
 
-    async def _load_from_mongo(self, key: str) -> Session | None:
-        """Try to load session from MongoDB (dual-collection)."""
+    async def _load_from_mongo(self, session_id: str) -> Session | None:
+        """Try to load session from MongoDB (new agent database)."""
         try:
-            meta_doc = await self._sessions_col.find_one({"_id": key})
+            meta_doc = await self._sessions_col.find_one({"_id": session_id})
             if not meta_doc:
                 return None
 
-            # Load all messages sorted by seq
+            # Load all messages sorted by seq (for LLM context)
             messages: list[dict[str, Any]] = []
             cursor = self._messages_col.find(
-                {"session_key": key},
+                {"session_id": session_id},
             ).sort("seq", 1)
             async for msg_doc in cursor:
                 # Strip MongoDB-internal fields
                 msg_doc.pop("_id", None)
-                msg_doc.pop("session_key", None)
+                msg_doc.pop("session_id", None)
                 msg_doc.pop("seq", None)
                 messages.append(msg_doc)
 
@@ -336,17 +482,23 @@ class SessionManager:
                 updated = datetime.fromisoformat(updated)
 
             session = Session(
-                key=key,
+                session_id=session_id,
+                user_id=meta_doc.get("user_id", ""),
+                workflow_id=meta_doc.get("workflow_id"),
+                channel=meta_doc.get("channel", "api"),
                 messages=messages,
                 created_at=created or datetime.now(),
                 updated_at=updated or datetime.now(),
-                metadata=meta_doc.get("metadata", {}),
                 summary=meta_doc.get("summary"),
+                message_count=meta_doc.get("message_count", 0),
+                turn_count=meta_doc.get("turn_count", 0),
+                last_message_preview=meta_doc.get("last_message_preview"),
+                metadata=meta_doc.get("metadata", {}),
                 _persisted_count=len(messages),
             )
             return session
         except Exception:
-            logger.warning("Failed to load session {} from MongoDB", key)
+            logger.warning("Failed to load session {} from MongoDB", session_id)
         return None
 
     @staticmethod
@@ -360,11 +512,17 @@ class SessionManager:
             updated = datetime.fromisoformat(updated)
         messages = doc.get("messages", [])
         return Session(
-            key=doc["_id"],
+            session_id=doc["_id"],
+            user_id=doc.get("user_id", ""),
+            workflow_id=doc.get("workflow_id"),
+            channel=doc.get("channel", "api"),
             messages=messages,
             created_at=created or datetime.now(),
             updated_at=updated or datetime.now(),
-            metadata=doc.get("metadata", {}),
             summary=doc.get("summary"),
+            message_count=doc.get("message_count", 0),
+            turn_count=doc.get("turn_count", 0),
+            last_message_preview=doc.get("last_message_preview"),
+            metadata=doc.get("metadata", {}),
             _persisted_count=doc.get("_persisted_count", len(messages)),
         )

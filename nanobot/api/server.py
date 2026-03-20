@@ -5,12 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import jwt
-from fastapi import FastAPI
-from fastapi import Header
-from fastapi import HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from loguru import logger
@@ -34,6 +33,7 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
     flow_id: str | None = None
+    metadata: dict | None = None  # frontend-provided metadata (files, etc.)
 
 
 def _authenticate_agent_request(
@@ -81,21 +81,27 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         init_mongo,
         test_mongo,
         ensure_indexes,
-        agent_sessions_collection,
-        agent_session_messages_collection,
+        agent_sessions_col,
+        agent_messages_col,
+        agent_tool_traces_col,
         mongo_client,
     )
     from nanobot.database.redis import init_redis, test_redis, redis_client
     from nanobot.session.manager import SessionManager
 
     # Initialize database connections (sync — creates clients, no I/O yet)
-    init_mongo(config.mongodb.uri, config.mongodb.db)
+    init_mongo(config.mongodb.uri, config.mongodb.db, config.mongodb.agent_db)
     init_redis(config.redis.host, config.redis.port, config.redis.password, config.redis.db, config.redis.ssl)
 
-    # Create SessionManager synchronously (Motor/Redis clients don't do I/O at creation)
-    from nanobot.database.mongo import agent_sessions_collection, agent_session_messages_collection
+    # Create SessionManager with new three-collection schema
+    from nanobot.database.mongo import agent_sessions_col, agent_messages_col, agent_tool_traces_col
     from nanobot.database.redis import redis_client
-    session_manager = SessionManager(agent_sessions_collection, agent_session_messages_collection, redis_client)
+    session_manager = SessionManager(
+        sessions_col=agent_sessions_col,
+        messages_col=agent_messages_col,
+        tool_traces_col=agent_tool_traces_col,
+        redis_client=redis_client,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -142,6 +148,8 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     )
     app.state.agent = agent
 
+    # ---- POST /v1/agent/chat — SSE streaming chat ----
+
     @app.post("/v1/agent/chat")
     async def chat(
         body: ChatRequest,
@@ -150,15 +158,11 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     ):
         auth_user = _authenticate_agent_request(authorization, cfg)
         flow_id = body.flow_id.strip() if isinstance(body.flow_id, str) and body.flow_id.strip() else None
-        session_key = (
-            f"api:{auth_user.user_id}:flow:{flow_id}:{body.session_id}"
-            if flow_id
-            else f"api:{auth_user.user_id}:{body.session_id}"
-        )
-        metadata = {"flow_id": flow_id} if flow_id else None
-        # 组装请求级私有上下文 (Private Context)
-        # 该对象利用 ContextVar 贯穿 Agent 的执行链路，避免敏感参数直接暴露在发给大语言模型的 Prompt 中，
-        # 并方便底层的各种 Tools（如 CreateWorkflowTool）无感获取用户身份、环境参量等执行上下文。
+
+        # session_id is passed directly from frontend as the primary key
+        session_id = body.session_id
+
+        # Private context for tools (not exposed to LLM prompt)
         private_context = {
             "auth_token": auth_user.token,
             "flow_id": flow_id,
@@ -180,12 +184,14 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                 try:
                     result = await app.state.agent.process_direct(
                         body.message,
-                        session_key=session_key,
+                        session_key=session_id,
                         channel="api",
                         chat_id=auth_user.user_id,
                         on_progress=on_progress,
-                        metadata=metadata,
+                        metadata={"flow_id": flow_id} if flow_id else None,
                         private_context=private_context,
+                        user_id=auth_user.user_id,
+                        workflow_id=flow_id,
                     )
                     await queue.put({"type": "done", "content": result or ""})
                 except Exception as e:
@@ -211,13 +217,51 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             },
         )
 
+    # ---- GET /v1/agent/sessions — lazy-loaded session list ----
+
     @app.get("/v1/agent/sessions")
     async def list_sessions(
         authorization: str | None = Header(default=None),
+        limit: int = Query(default=10, ge=1, le=50),
+        before: str | None = Query(default=None, description="Cursor: updated_at ISO string of last item"),
     ):
         auth_user = _authenticate_agent_request(authorization, cfg)
-        sessions = await session_manager.list_sessions(user_id=auth_user.user_id)
-        return {"sessions": sessions}
+        before_dt = None
+        if before:
+            try:
+                before_dt = datetime.fromisoformat(before)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid 'before' datetime format")
+        return await session_manager.list_sessions(
+            user_id=auth_user.user_id,
+            limit=limit,
+            before=before_dt,
+        )
+
+    # ---- GET /v1/agent/sessions/{session_id}/messages — lazy-loaded by turn ----
+
+    @app.get("/v1/agent/sessions/{session_id}/messages")
+    async def get_session_messages(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+        turns: int = Query(default=10, ge=1, le=50),
+        before_turn: int | None = Query(default=None, description="Cursor: return turns before this turn number"),
+    ):
+        auth_user = _authenticate_agent_request(authorization, cfg)
+        # Verify the session belongs to this user
+        session_doc = await session_manager._sessions_col.find_one({"_id": session_id})
+        if not session_doc:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if session_doc.get("user_id") != auth_user.user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        return await session_manager.get_messages_page(
+            session_id=session_id,
+            turns=turns,
+            before_turn=before_turn,
+        )
+
+    # ---- GET /health ----
 
     @app.get("/health")
     async def health():

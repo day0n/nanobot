@@ -168,7 +168,8 @@ class MongoDBConfig(Base):
     """MongoDB connection configuration."""
 
     uri: str = "mongodb://localhost:27017"  # MongoDB Atlas URI (mongodb+srv://...)
-    db: str = "nanobot"
+    db: str = "opencreator"  # Main database (used by publisher/consumer)
+    agent_db: str = "opencreator_agent"  # Separate database for agent sessions/messages/traces
 
 
 class RedisConfig(Base):
