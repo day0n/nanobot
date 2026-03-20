@@ -73,28 +73,23 @@ description: 在当前画布中编辑 OpenCreator 工作流
   - 执行节点到下一执行节点：建议继续 `+520`
   - 这样能覆盖前端常见节点宽度（输入节点约 300，执行节点约 360）并留出安全间距
 - 新增顶层节点的纵向排布建议：
-  - 同列节点不要贴着放
-  - 纵向间距必须基于节点实际高度：`nextY = currentY + currentNode.measured.height + 80`
-  - `get_workflow` 返回的 `measured.height` 是节点真实像素高度，必须用它来计算
-  - 没有 measured 数据时（新建工作流），用 `node-configs.md` 中的估算高度
-  - **禁止使用固定 y 间距**（如 300、400），因为节点高度从 250px 到 930px 不等
+  - 所有节点统一按 宽 `350`、高 `800` 估算，同列相邻节点 `nextY = prevY + 880`
+  - 有 `measured` 数据时用 `measured.height` 替代 800
 - 多分支场景：
   - 同一层分支优先上下展开，不要和主链横向挤在一起
-  - 如果一个父节点分出多条支路，优先共用同一“下一列”，再按 `y` 方向错开
+  - 如果一个父节点分出多条支路，优先共用同一”下一列”，再按 `y` 方向错开
 - 删除或重连时：
   - 不要为了”看起来整齐”而顺手改动无关节点坐标
   - 除非用户明确要求整理布局，否则只改受影响节点的位置
 
 ## 整理布局场景
 
-当用户要求”整理布局”、”排列整齐”、”重新排版”时，执行以下流程：
+当用户要求”整理布局”、”排列整齐”、”重新排版”时：
 
-1. 调用 `get_workflow`，**必须读取每个节点的 `measured.width` 和 `measured.height`**
-2. 按 DAG 拓扑对节点分层（layer 0 = 入度为 0 的节点，后续层 = max(前驱层) + 1）
-3. 计算每层 x 坐标：`layerX = 前一层 x + 前一层最宽节点的 measured.width + 120`
-4. 计算同层内 y 坐标：`nextY = prevY + prevNode.measured.height + 80`
-5. **关键：永远不要用固定 y 间距，必须用 measured.height + 间隙来计算**
-6. 节点数据（data）和连线（edges）保持不变，只改 position
+1. 调用 `get_workflow`，读取每个节点的 `measured` 尺寸
+2. 按 DAG 拓扑分层，从左到右排列，列间距 `520`
+3. 同层多节点从上到下：`nextY = prevY + 880`（有 measured 时用 `measured.height + 80`）
+4. 只改 position，不改 data 和 edges
 
 ## 场景分析与反推搭流
 
