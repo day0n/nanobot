@@ -80,7 +80,7 @@ async def ensure_indexes() -> None:
     await agent_sessions_col.create_index(
         [("user_id", 1), ("workflow_id", 1)],
         name="user_workflow_idx",
-        partialFilterExpression={"workflow_id": {"$ne": None}},
+        partialFilterExpression={"workflow_id": {"$exists": True}},
     )
 
     # agent_messages: LLM context loading (all roles, ordered by seq)
