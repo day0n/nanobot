@@ -612,8 +612,8 @@ class AgentLoop:
         session.updated_at = datetime.now()
 
     _SUMMARY_PROMPT = (
-        "Generate a concise title (3-7 words) for this conversation. "
-        "Reply with ONLY the title, no quotes or punctuation. "
+        "Summarize this conversation in one short sentence (no more than 15 words). "
+        "Reply with ONLY the sentence, no quotes or extra punctuation. "
         "Use the same language as the user's message."
     )
 
