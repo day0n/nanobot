@@ -272,6 +272,7 @@ class SessionManager:
     async def list_sessions(
         self,
         user_id: str,
+        workflow_id: str | None = None,
         limit: int = 10,
         after_session_id: str | None = None,
     ) -> dict[str, Any]:
@@ -279,14 +280,17 @@ class SessionManager:
 
         Args:
             user_id: Filter by user.
+            workflow_id: Optional — filter by workflow (canvas). When provided,
+                only returns sessions belonging to that workflow.
             limit: Max sessions to return.
             after_session_id: Cursor — the session_id of the last item from the previous page.
-                The server looks up its updated_at and returns older sessions.
 
         Returns:
             { "sessions": [...], "has_more": bool }
         """
         query: dict[str, Any] = {"user_id": user_id}
+        if workflow_id is not None:
+            query["workflow_id"] = workflow_id
 
         # Resolve cursor: look up the updated_at of the given session_id
         if after_session_id is not None:

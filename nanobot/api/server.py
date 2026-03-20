@@ -222,16 +222,21 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         )
 
     # ---- GET /v1/agent/sessions — lazy-loaded session list ----
+    # Supports two modes:
+    #   1. By workflow: GET /sessions?workflow_id=xxx  — get sessions for a specific canvas
+    #   2. All sessions: GET /sessions                 — get all sessions for the user
 
     @app.get("/v1/agent/sessions")
     async def list_sessions(
         authorization: str | None = Header(default=None),
+        workflow_id: str | None = Query(default=None, description="Filter sessions by workflow/flow ID"),
         limit: int = Query(default=10, ge=1, le=50),
         after: str | None = Query(default=None, description="Cursor: session_id of the last item from previous page"),
     ):
         auth_user = _authenticate_agent_request(authorization, cfg)
         return await session_manager.list_sessions(
             user_id=auth_user.user_id,
+            workflow_id=workflow_id,
             limit=limit,
             after_session_id=after,
         )
