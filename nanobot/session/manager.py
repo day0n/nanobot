@@ -273,16 +273,28 @@ class SessionManager:
         self,
         user_id: str,
         limit: int = 10,
-        before: datetime | None = None,
+        after_session_id: str | None = None,
     ) -> dict[str, Any]:
         """List sessions for a user with cursor-based lazy loading.
+
+        Args:
+            user_id: Filter by user.
+            limit: Max sessions to return.
+            after_session_id: Cursor — the session_id of the last item from the previous page.
+                The server looks up its updated_at and returns older sessions.
 
         Returns:
             { "sessions": [...], "has_more": bool }
         """
         query: dict[str, Any] = {"user_id": user_id}
-        if before is not None:
-            query["updated_at"] = {"$lt": before}
+
+        # Resolve cursor: look up the updated_at of the given session_id
+        if after_session_id is not None:
+            cursor_doc = await self._sessions_col.find_one(
+                {"_id": after_session_id}, {"updated_at": 1}
+            )
+            if cursor_doc and cursor_doc.get("updated_at"):
+                query["updated_at"] = {"$lt": cursor_doc["updated_at"]}
 
         cursor = self._sessions_col.find(query).sort("updated_at", -1).limit(limit + 1)
         sessions = []

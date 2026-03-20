@@ -223,19 +223,13 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     async def list_sessions(
         authorization: str | None = Header(default=None),
         limit: int = Query(default=10, ge=1, le=50),
-        before: str | None = Query(default=None, description="Cursor: updated_at ISO string of last item"),
+        after: str | None = Query(default=None, description="Cursor: session_id of the last item from previous page"),
     ):
         auth_user = _authenticate_agent_request(authorization, cfg)
-        before_dt = None
-        if before:
-            try:
-                before_dt = datetime.fromisoformat(before)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid 'before' datetime format")
         return await session_manager.list_sessions(
             user_id=auth_user.user_id,
             limit=limit,
-            before=before_dt,
+            after_session_id=after,
         )
 
     # ---- GET /v1/agent/sessions/{session_id}/messages — lazy-loaded by turn ----
