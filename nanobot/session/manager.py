@@ -405,6 +405,21 @@ class SessionManager:
 
     async def _write_redis(self, session: Session) -> None:
         """Write session metadata and LLM context to Redis."""
+        # Preserve existing summary if current session doesn't have one yet
+        # (avoids overwriting a summary written by the background generation task)
+        summary = session.summary
+        if summary is None:
+            try:
+                meta_key_existing = f"{REDIS_META_PREFIX}{session.session_id}"
+                raw = await self._redis.get(meta_key_existing)
+                if raw:
+                    existing = json.loads(raw)
+                    if existing.get("summary"):
+                        summary = existing["summary"]
+                        session.summary = summary  # sync back to in-memory session
+            except Exception:
+                pass
+
         # Meta cache (lightweight)
         meta_key = f"{REDIS_META_PREFIX}{session.session_id}"
         meta_doc = {
@@ -412,7 +427,7 @@ class SessionManager:
             "user_id": session.user_id,
             "workflow_id": session.workflow_id,
             "channel": session.channel,
-            "summary": session.summary,
+            "summary": summary,
             "message_count": session.message_count,
             "turn_count": session.turn_count,
             "last_message_preview": session.last_message_preview,
@@ -429,7 +444,7 @@ class SessionManager:
             "workflow_id": session.workflow_id,
             "channel": session.channel,
             "messages": session.messages,
-            "summary": session.summary,
+            "summary": summary,
             "message_count": session.message_count,
             "turn_count": session.turn_count,
             "last_message_preview": session.last_message_preview,
