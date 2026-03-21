@@ -90,20 +90,22 @@ class SubagentManager:
         logger.info("Subagent [{}] starting task: {}", task_id, label)
 
         try:
-            # Build subagent tools (no message tool, no spawn tool)
+            # Build subagent tools — keep in sync with main agent (loop.py _register_default_tools)
             tools = ToolRegistry()
             allowed_dir = self.workspace if self.restrict_to_workspace else None
             extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
             tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read))
-            tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(ExecTool(
-                working_dir=str(self.workspace),
-                timeout=self.exec_config.timeout,
-                restrict_to_workspace=self.restrict_to_workspace,
-                path_append=self.exec_config.path_append,
-            ))
+            # Disabled for chatbot-only rollout: do not expose workspace mutation tools.
+            # tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
+            # tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
+            # tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
+            # Disabled for chatbot-only rollout: do not expose shell execution.
+            # tools.register(ExecTool(
+            #     working_dir=str(self.workspace),
+            #     timeout=self.exec_config.timeout,
+            #     restrict_to_workspace=self.restrict_to_workspace,
+            #     path_append=self.exec_config.path_append,
+            # ))
             tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
             tools.register(WebFetchTool(proxy=self.web_proxy))
             
