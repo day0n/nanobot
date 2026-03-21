@@ -16,7 +16,6 @@ from nanobot.agent.request_context import get_request_context
 from nanobot.agent.tools.base import Tool
 
 _API_BASE = "https://api-develop.opencreator.io"
-_INTERNAL_AUTH = "ODljMGNjYzgtNjk5Ni00NGYzLWJlNDMtOWQ5NzIyYWNlOGVj"
 _EDITOR_BASE = "https://editor-dev.opencreator.io"
 _NODE_WIDTH = 360.0
 _DEFAULT_NODE_HEIGHT = 280.0
@@ -585,7 +584,7 @@ class EditWorkflowTool(Tool):
 
     def _auth_header(self) -> str:
         if not self.internal_api_key:
-            return _INTERNAL_AUTH
+            raise ValueError("internal_api_key is not configured. Set NANOBOT_API__INTERNAL_API_KEY in .env.local.")
         return base64.b64encode(self.internal_api_key.encode("utf-8")).decode("ascii")
 
     async def execute(
