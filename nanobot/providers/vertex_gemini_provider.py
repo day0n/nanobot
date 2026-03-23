@@ -415,6 +415,7 @@ class VertexGeminiProvider(LLMProvider):
                     text_delta += part.text
 
             if text_delta:
+                logger.debug("Gemini stream chunk: {} chars", len(text_delta))
                 yield LLMStreamChunk(text_delta=text_delta)
 
         # Final chunk with accumulated state
