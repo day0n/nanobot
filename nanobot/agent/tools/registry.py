@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from loguru import logger
+
 from nanobot.agent.tools.base import Tool, ToolResult
 
 
@@ -60,6 +62,7 @@ class ToolRegistry:
                 return result + _HINT
             return result
         except Exception as e:
+            logger.exception("Tool '{}' raised an exception", name)
             return f"Error executing {name}: {str(e)}" + _HINT
 
     @property
