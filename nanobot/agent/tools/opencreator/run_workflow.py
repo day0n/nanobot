@@ -37,6 +37,17 @@ class RunWorkflowTool(Tool):
                     "workflow runs. Node IDs look like 'textGenerator-1711234567890-abc123'."
                 ),
             },
+            "user_selection": {
+                "type": "object",
+                "description": (
+                    "Optional. Required for single-node runs when predecessor nodes have "
+                    "historical results. Keys are pin types ('text', 'image', 'video', 'audio'), "
+                    "values are arrays of {node_id, outputs: [{model, output, path}]}. "
+                    "Use get_workflow_results first to see available results, then build this "
+                    "from the predecessor outputs. If a predecessor has multiple results, "
+                    "ask the user which one to use before calling this tool."
+                ),
+            },
         },
         "required": [],
     }
@@ -45,7 +56,7 @@ class RunWorkflowTool(Tool):
         self.api_base = api_base.strip() or _API_BASE
         self._engine = workflow_engine
 
-    async def execute(self, node_ids: list[str] | None = None, **_: Any) -> str | WorkflowExecution:
+    async def execute(self, node_ids: list[str] | None = None, user_selection: dict | None = None, **_: Any) -> str | WorkflowExecution:
         from nanoid import generate as nanoid_generate
         from nanobot.workflow.event_bridge import register, unregister
 
@@ -97,6 +108,7 @@ class RunWorkflowTool(Tool):
                 user_id=user_id or "",
                 start_ids=start_ids,
                 end_ids=end_ids,
+                user_selection=user_selection,
             )
         except Exception as e:
             unregister(ws_id)
