@@ -67,6 +67,7 @@ class AgentResponse:
 _AGENT_STARTED = "agent.started"
 _AGENT_COMPLETED = "agent.completed"
 _AGENT_FAILED = "agent.failed"
+_AGENT_HEARTBEAT = "agent.heartbeat"
 
 _MESSAGE_DELTA = "message.delta"
 
@@ -105,6 +106,10 @@ def agent_completed(content: str, usage: dict[str, int] | None = None) -> AgentE
 
 def agent_failed(error: str) -> AgentEvent:
     return AgentEvent(event=_AGENT_FAILED, data={"error": error})
+
+
+def agent_heartbeat() -> AgentEvent:
+    return AgentEvent(event=_AGENT_HEARTBEAT, data={})
 
 
 def message_delta(content: str) -> AgentEvent:

@@ -21,6 +21,7 @@ from nanobot.agent.events import (
     ResponseAccumulator,
     agent_completed,
     agent_failed,
+    agent_heartbeat,
     agent_started,
 )
 from nanobot.agent.loop import AgentLoop
@@ -262,7 +263,11 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             task = asyncio.create_task(run_agent())
             try:
                 while True:
-                    event = await queue.get()
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=15)
+                    except asyncio.TimeoutError:
+                        yield f"data: {json.dumps(agent_heartbeat().to_dict(), ensure_ascii=False)}\n\n"
+                        continue
                     yield f"data: {json.dumps(event.to_dict(), ensure_ascii=False)}\n\n"
                     if event.is_terminal:
                         break
