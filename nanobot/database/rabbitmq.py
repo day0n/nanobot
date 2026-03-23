@@ -18,7 +18,7 @@ import aio_pika
 from loguru import logger
 
 # Module-level state, initialised by init_rabbitmq()
-_mq_connection: aio_pika.abc.AbstractRobustConnection | None = None
+_mq_connection: aio_pika.RobustConnection | None = None
 _reply_queue_name: str = ""
 _num_workers: int = 3
 _worker_queues: dict[int, asyncio.Queue] = {}
@@ -27,7 +27,7 @@ _worker_queues: dict[int, asyncio.Queue] = {}
 _dispatch_fn: Callable[[str, dict[str, Any]], Awaitable[bool]] | None = None
 
 
-def set_dispatch_fn(fn: Callable[[str, dict[str, Any]], Awaitable[bool]]) -> None:
+def set_dispatch_fn(fn: Callable) -> None:
     """Inject the event dispatch function. Called once from server.py at startup."""
     global _dispatch_fn
     _dispatch_fn = fn
@@ -53,7 +53,7 @@ async def start_mq_consumer(
     password: str,
     ssl: bool = True,
     prefetch_count: int = 1000,
-) -> aio_pika.abc.AbstractRobustConnection:
+) -> aio_pika.RobustConnection:
     """Connect to RabbitMQ, declare reply queue, start worker tasks."""
     global _mq_connection
 
