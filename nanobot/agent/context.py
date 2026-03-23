@@ -40,7 +40,7 @@ class ContextBuilder:
         if skills_summary:
             parts.append(f"""# Skills
 
-The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
+The following skills extend your capabilities. When a skill has a <trigger>, you MUST call load_skill with its name before performing that action.
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
@@ -81,7 +81,7 @@ This is your runtime directory for file operations and session storage.
 
 ## Creato Guidelines
 - State intent before tool calls, but NEVER predict or claim results before receiving them.
-- Only use the currently available tools: `read_file`, `web_search`, `web_fetch`, `spawn`, `get_workflow`, and `edit_workflow`.
+- Only use the currently available tools: `read_file`, `web_search`, `web_fetch`, `spawn`, `load_skill`, `get_workflow`, `get_workflow_results`, `edit_workflow`, and `run_workflow`.
 - Do not assume file-writing, shell, directory-listing, cron, message-sending, or MCP tools are available.
 - Before reading a file, confirm it is necessary. Do not assume files or directories exist.
 - If a tool call fails, analyze the error before retrying with a different approach.

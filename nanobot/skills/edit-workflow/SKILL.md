@@ -1,6 +1,7 @@
 ---
 name: edit-workflow
 description: 在当前画布中编辑 OpenCreator 工作流
+trigger: Before calling edit_workflow tool
 ---
 
 # 编辑 OpenCreator 工作流

@@ -32,7 +32,7 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.base import ToolResult, WorkflowExecution
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
-from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, LoadSkillTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
@@ -163,6 +163,7 @@ class AgentLoop:
             internal_api_key=self.api_config.internal_api_key,
             editor_base=self.api_config.editor_base,
         ))
+        self.tools.register(LoadSkillTool(skills_loader=self.context.skills))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -548,6 +549,19 @@ class AgentLoop:
         """Process a single inbound message and return the response."""
         ctx = dict(private_context or {})
         request_ctx_token = set_request_context(ctx)
+
+        # Start a Sentry transaction so spans are captured even inside asyncio.create_task
+        _txn = sentry_sdk.start_transaction(
+            op="agent.chat",
+            name="agent.process_message",
+        )
+        _txn.__enter__()
+        if user_id:
+            sentry_sdk.set_user({"id": user_id})
+        sentry_sdk.set_tag("channel", msg.channel)
+        if session_key or msg.session_key:
+            sentry_sdk.set_tag("session_key", session_key or msg.session_key)
+
         # System messages: parse origin from chat_id ("channel:chat_id")
         try:
             if msg.channel == "system":
@@ -666,6 +680,7 @@ class AgentLoop:
                 metadata=msg.metadata or {},
             )
         finally:
+            _txn.__exit__(None, None, None)
             reset_request_context(request_ctx_token)
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int, tool_timings: dict[str, dict] | None = None) -> None:
