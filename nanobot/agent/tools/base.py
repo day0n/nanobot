@@ -1,7 +1,39 @@
 """Base class for agent tools."""
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator
+from dataclasses import dataclass, field
 from typing import Any
+
+
+@dataclass(slots=True)
+class ToolResult:
+    """Rich return type for tools that need to emit side-channel events.
+
+    Tools that only return text can keep returning ``str``.  Tools that
+    also need to notify the frontend (e.g. ``workflow_update``) return a
+    ``ToolResult`` instead — the loop dispatches ``events`` via SSE while
+    feeding ``content`` back to the LLM.
+    """
+
+    content: str
+    events: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class WorkflowExecution:
+    """Return type for RunWorkflowTool — carries an async event stream.
+
+    The agent loop consumes ``event_stream``, emits ``workflow.*`` SSE events
+    for each Consumer event, and feeds ``content`` back to the LLM when the
+    stream ends (finish/select/kill).
+    """
+
+    flow_task_id: str
+    run_id: str
+    ws_id: str
+    event_stream: AsyncGenerator[dict[str, Any], None]
+    content: str = ""  # populated by loop after stream ends
 
 
 class Tool(ABC):
@@ -40,7 +72,7 @@ class Tool(ABC):
         pass
 
     @abstractmethod
-    async def execute(self, **kwargs: Any) -> str:
+    async def execute(self, **kwargs: Any) -> str | ToolResult:
         """
         Execute the tool with given parameters.
 

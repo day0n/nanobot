@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import AsyncGenerator
 from functools import lru_cache
 from typing import Any
 
 from loguru import logger
 
-from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.providers.base import LLMProvider, LLMResponse, LLMStreamChunk, ToolCallRequest
 
 # Preview models that require location='global' on Vertex AI
 _PREVIEW_MODELS = {
@@ -324,3 +325,100 @@ class VertexGeminiProvider(LLMProvider):
                 content=f"Error calling Vertex Gemini: {e}",
                 finish_reason="error",
             )
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 1.0,
+        reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+    ) -> AsyncGenerator[LLMStreamChunk, None]:
+        """Stream Gemini responses via generate_content_stream().
+
+        Text deltas are yielded immediately.  Thinking blocks and tool calls
+        are accumulated internally and yielded on the final chunk — this
+        preserves thought_signature integrity required by Gemini 3.x.
+        """
+        from google.genai.types import GenerateContentConfig
+
+        model_name = model or self.default_model
+        preview = _is_preview_model(model_name)
+        client = self._get_client(preview)
+
+        contents, system_prompt = self._messages_to_contents(messages)
+
+        config_kwargs: dict[str, Any] = {
+            "max_output_tokens": max(1, max_tokens),
+            "temperature": temperature,
+        }
+        if system_prompt:
+            config_kwargs["system_instruction"] = system_prompt
+        if tools:
+            config_kwargs["tools"] = self._tools_to_genai(tools)
+
+        config = GenerateContentConfig(**config_kwargs)
+
+        logger.debug(
+            "VertexGemini stream {} (project={}, location={}, preview={})",
+            model_name, self._project, "global" if preview else self._location, preview,
+        )
+
+        accumulated_tool_calls: list[ToolCallRequest] = []
+        accumulated_thinking: list[dict[str, Any]] = []
+
+        async for chunk in client.aio.models.generate_content_stream(
+            model=model_name,
+            contents=contents,
+            config=config,
+        ):
+            candidate = chunk.candidates[0] if chunk.candidates else None
+            if not candidate or not candidate.content or not candidate.content.parts:
+                continue
+
+            text_delta = ""
+            for part in candidate.content.parts:
+                if getattr(part, "thought", False):
+                    # Accumulate thinking, preserve thought_signature
+                    block: dict[str, Any] = {"type": "gemini_thought", "thinking": part.text or ""}
+                    try:
+                        sig = part.thought_signature
+                        if sig:
+                            block["thought_signature"] = base64.b64encode(sig).decode()
+                    except Exception:
+                        pass
+                    accumulated_thinking.append(block)
+
+                elif hasattr(part, "function_call") and part.function_call:
+                    # Accumulate tool calls, preserve thought_signature
+                    fc = part.function_call
+                    accumulated_tool_calls.append(ToolCallRequest(
+                        id=f"call_{fc.name}",
+                        name=fc.name,
+                        arguments=dict(fc.args) if fc.args else {},
+                    ))
+                    try:
+                        sig = part.thought_signature
+                        if sig:
+                            accumulated_thinking.append({
+                                "type": "gemini_fc_signature",
+                                "tool_name": fc.name,
+                                "thought_signature": base64.b64encode(sig).decode(),
+                            })
+                    except Exception:
+                        pass
+
+                elif hasattr(part, "text") and part.text:
+                    text_delta += part.text
+
+            if text_delta:
+                yield LLMStreamChunk(text_delta=text_delta)
+
+        # Final chunk with accumulated state
+        yield LLMStreamChunk(
+            completed_tool_calls=accumulated_tool_calls or None,
+            finish_reason="tool_calls" if accumulated_tool_calls else "stop",
+            thinking_blocks=accumulated_thinking or None,
+        )

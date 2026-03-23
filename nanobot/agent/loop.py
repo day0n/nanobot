@@ -14,8 +14,21 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.events import (
+    AgentEvent,
+    WORKFLOW_EVENT_MAP,
+    message_delta,
+    step_completed,
+    step_started,
+    tool_completed,
+    tool_event,
+    tool_failed,
+    tool_started,
+    workflow_started,
+)
 from nanobot.agent.request_context import reset_request_context, set_request_context
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.tools.base import ToolResult, WorkflowExecution
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -23,11 +36,11 @@ from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
-from nanobot.agent.tools.opencreator import EditWorkflowTool, GetWorkflowTool
+from nanobot.agent.tools.opencreator import EditWorkflowTool, GetWorkflowTool, RunWorkflowTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.providers.base import LLMProvider
+from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
@@ -177,7 +190,7 @@ class AgentLoop:
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
-        on_progress: Callable[..., Awaitable[None]] | None = None,
+        on_progress: Callable[[AgentEvent], Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str], list[dict], dict[str, dict]]:
         """Run the agent iteration loop.
 
@@ -193,24 +206,56 @@ class AgentLoop:
 
         while iteration < self.max_iterations:
             iteration += 1
+            if on_progress:
+                await on_progress(step_started(iteration))
 
             tool_defs = self.tools.get_definitions()
 
-            response = await self.provider.chat_with_retry(
-                messages=messages,
-                tools=tool_defs,
-                model=self.model,
+            # --- Stream LLM response ---
+            accumulated_content = ""
+            all_tool_calls: list = []
+            finish_reason = "stop"
+            thinking_blocks = None
+            reasoning_content = None
+            usage: dict[str, int] = {}
+
+            try:
+                stream = self.provider.chat_stream_with_retry(
+                    messages=messages,
+                    tools=tool_defs,
+                    model=self.model,
+                )
+                async for chunk in stream:
+                    if chunk.text_delta:
+                        accumulated_content += chunk.text_delta
+                        if on_progress:
+                            await on_progress(message_delta(chunk.text_delta))
+                    if chunk.completed_tool_calls:
+                        all_tool_calls.extend(chunk.completed_tool_calls)
+                    if chunk.finish_reason:
+                        finish_reason = chunk.finish_reason
+                    if chunk.thinking_blocks:
+                        thinking_blocks = chunk.thinking_blocks
+                    if chunk.usage:
+                        usage = chunk.usage
+                    if chunk.error_content:
+                        accumulated_content = chunk.error_content
+                        finish_reason = "error"
+            except asyncio.CancelledError:
+                await stream.aclose()
+                raise
+
+            # Reconstruct LLMResponse from accumulated chunks
+            response = LLMResponse(
+                content=accumulated_content or None,
+                tool_calls=all_tool_calls,
+                finish_reason=finish_reason,
+                usage=usage,
+                reasoning_content=reasoning_content,
+                thinking_blocks=thinking_blocks,
             )
 
             if response.has_tool_calls:
-                if on_progress:
-                    thought = self._strip_think(response.content)
-                    if thought:
-                        await on_progress(thought)
-                    tool_hint = self._tool_hint(response.tool_calls)
-                    tool_hint = self._strip_think(tool_hint)
-                    await on_progress(tool_hint, tool_hint=True)
-
                 tool_call_dicts = [
                     tc.to_openai_tool_call()
                     for tc in response.tool_calls
@@ -226,28 +271,82 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
 
+                    if on_progress:
+                        await on_progress(tool_started(tool_call.name, tool_call.id, tool_call.arguments))
+
                     from datetime import datetime as _dt
                     started_at = _dt.now()
                     error_msg = None
+                    result_obj: str | ToolResult | WorkflowExecution
                     try:
-                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        result_obj = await self.tools.execute(tool_call.name, tool_call.arguments)
                     except Exception as e:
                         error_msg = str(e)
-                        result = f"Error: {e}"
+                        result_obj = f"Error: {e}"
                     completed_at = _dt.now()
+                    duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+
+                    # Handle WorkflowExecution — consume event stream, emit workflow.* SSE events
+                    if isinstance(result_obj, WorkflowExecution):
+                        if on_progress:
+                            await on_progress(workflow_started({
+                                "flow_task_id": result_obj.flow_task_id,
+                                "run_id": result_obj.run_id,
+                                "ws_id": result_obj.ws_id,
+                            }))
+                        result_str = "Workflow completed successfully"
+                        try:
+                            async for raw_event in result_obj.event_stream:
+                                et = raw_event.get("event_type")
+                                constructor = WORKFLOW_EVENT_MAP.get(et)
+                                if constructor and on_progress:
+                                    await on_progress(constructor(raw_event))
+                                # select → stop consuming, return control to LLM
+                                if et == "node_status" and raw_event.get("status") == "select":
+                                    node_id = raw_event.get("node_id", "unknown")
+                                    result_str = f"Workflow paused: node {node_id} needs user selection on the canvas."
+                                    break
+                                if et == "node_status" and raw_event.get("status") == "failed":
+                                    error_msg = raw_event.get("error_msg", "Node execution failed")
+                                    result_str = f"Workflow failed: {error_msg}"
+                                    break
+                                if et in ("finish_flow", "flow_killed"):
+                                    break
+                        except Exception as stream_err:
+                            logger.error("Workflow event stream error: {}", stream_err)
+                            error_msg = str(stream_err)
+                            result_str = f"Error consuming workflow events: {stream_err}"
+                        # Recalculate duration after stream consumption
+                        completed_at = _dt.now()
+                        duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+
+                    # Extract ToolResult events and emit them
+                    elif isinstance(result_obj, ToolResult):
+                        for evt in result_obj.events:
+                            if on_progress:
+                                await on_progress(tool_event(evt.get("name", "tool.output"), evt.get("data", {})))
+                        result_str = result_obj.content
+                    else:
+                        result_str = result_obj
+
+                    if on_progress:
+                        if error_msg:
+                            await on_progress(tool_failed(tool_call.id, error_msg))
+                        else:
+                            await on_progress(tool_completed(tool_call.id, duration_ms))
 
                     tool_timings[tool_call.id] = {
                         "name": tool_call.name,
                         "args": tool_call.arguments,
                         "started_at": started_at,
                         "completed_at": completed_at,
-                        "duration_ms": int((completed_at - started_at).total_seconds() * 1000),
+                        "duration_ms": duration_ms,
                         "error": error_msg,
-                        "raw_output": result,
+                        "raw_output": result_str,
                     }
 
                     messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
+                        messages, tool_call.id, tool_call.name, result_str
                     )
             else:
                 clean = self._strip_think(response.content)
@@ -263,6 +362,9 @@ class AgentLoop:
                 )
                 final_content = clean
                 break
+
+            if on_progress:
+                await on_progress(step_completed(iteration))
 
         if final_content is None and iteration >= self.max_iterations:
             logger.warning("Max iterations ({}) reached", self.max_iterations)
@@ -377,15 +479,13 @@ class AgentLoop:
         self,
         msg: InboundMessage,
         session_key: str | None = None,
-        on_progress: Callable[[str], Awaitable[None]] | None = None,
+        on_progress: Callable[[AgentEvent], Awaitable[None]] | None = None,
         private_context: dict[str, Any] | None = None,
         user_id: str = "",
         workflow_id: str | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         ctx = dict(private_context or {})
-        if on_progress is not None:
-            ctx["_on_progress"] = on_progress
         request_ctx_token = set_request_context(ctx)
         # System messages: parse origin from chat_id ("channel:chat_id")
         try:
@@ -465,10 +565,13 @@ class AgentLoop:
                 metadata=msg.metadata,
             )
 
-            async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+            async def _bus_progress(event: AgentEvent) -> None:
                 meta = dict(msg.metadata or {})
                 meta["_progress"] = True
-                meta["_tool_hint"] = tool_hint
+                content = event.data.get("content", "")
+                if event.event == "tool.started":
+                    meta["_tool_hint"] = True
+                    content = event.data.get("tool_name", "")
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
                 ))
@@ -686,7 +789,7 @@ class AgentLoop:
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
-        on_progress: Callable[[str], Awaitable[None]] | None = None,
+        on_progress: Callable[[AgentEvent], Awaitable[None]] | None = None,
         metadata: dict[str, Any] | None = None,
         private_context: dict[str, Any] | None = None,
         user_id: str = "",

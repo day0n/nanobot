@@ -28,11 +28,15 @@ agent_sessions_col = None      # agent_sessions — session metadata
 agent_messages_col = None      # agent_messages — all messages (user/agent/assistant/tool)
 agent_tool_traces_col = None   # agent_tool_traces — tool execution traces
 
+# Workflow execution collection (shared with publisher/consumer)
+flow_task_col = None           # flow_task — workflow execution task records
+
 
 def init_mongo(uri: str, db_name: str, agent_db_name: str = "opencreator_agent") -> None:
     """Create the Motor client and bind collections for both databases."""
     global mongo_client, db, agent_sessions_collection, agent_session_messages_collection
     global agent_db, agent_sessions_col, agent_messages_col, agent_tool_traces_col
+    global flow_task_col
 
     mongo_client = AsyncIOMotorClient(uri, server_api=ServerApi("1"))
 
@@ -46,6 +50,9 @@ def init_mongo(uri: str, db_name: str, agent_db_name: str = "opencreator_agent")
     agent_sessions_col = agent_db["agent_sessions"]
     agent_messages_col = agent_db["agent_messages"]
     agent_tool_traces_col = agent_db["agent_tool_traces"]
+
+    # Workflow execution (shared main database)
+    flow_task_col = db["flow_task"]
 
 
 async def test_mongo() -> None:

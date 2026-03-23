@@ -3,6 +3,7 @@
 import asyncio
 import json
 from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -49,6 +50,30 @@ class LLMResponse:
     def has_tool_calls(self) -> bool:
         """Check if response contains tool calls."""
         return len(self.tool_calls) > 0
+
+
+@dataclass
+class LLMStreamChunk:
+    """A single chunk from a streaming LLM response.
+
+    Providers yield these from ``chat_stream()``.  The consumer (agent loop)
+    accumulates them into a full ``LLMResponse``.
+
+    Design notes (from architecture review):
+    - ``completed_tool_calls`` can arrive in ANY chunk (Gemini yields
+      function_call parts mid-stream), so the loop must accumulate across
+      all chunks, not just the final one.
+    - ``thinking_blocks`` are accumulated internally by the provider and
+      yielded only on the final chunk.
+    - ``error_content`` is set when the stream breaks mid-way (don't retry).
+    """
+
+    text_delta: str = ""
+    completed_tool_calls: list[ToolCallRequest] | None = None
+    finish_reason: str | None = None
+    thinking_blocks: list[dict] | None = None
+    usage: dict[str, int] | None = None
+    error_content: str | None = None
 
 
 @dataclass(frozen=True)
@@ -341,3 +366,129 @@ class LLMProvider(ABC):
     def get_default_model(self) -> str:
         """Get the default model for this provider."""
         pass
+
+    # ── streaming interface ─────────────────────────────────────────
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+    ) -> AsyncGenerator[LLMStreamChunk, None]:
+        """Stream a chat completion as chunks.
+
+        Default implementation falls back to ``chat()`` and yields a single
+        chunk.  Providers that support native streaming (e.g. Vertex Gemini)
+        should override this method.
+        """
+        response = await self.chat(
+            messages=messages, tools=tools, model=model,
+            max_tokens=max_tokens, temperature=temperature,
+            reasoning_effort=reasoning_effort, tool_choice=tool_choice,
+        )
+        yield LLMStreamChunk(
+            text_delta=response.content or "",
+            completed_tool_calls=response.tool_calls or None,
+            finish_reason=response.finish_reason,
+            thinking_blocks=response.thinking_blocks,
+            usage=response.usage or None,
+        )
+
+    async def chat_stream_with_retry(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: object = _SENTINEL,
+        temperature: object = _SENTINEL,
+        reasoning_effort: object = _SENTINEL,
+        tool_choice: str | dict[str, Any] | None = None,
+    ) -> AsyncGenerator[LLMStreamChunk, None]:
+        """Stream with retry on transient failures.
+
+        Three-level retry strategy:
+        1. Connection failure (no chunks received) → retry
+        2. First chunk is an error → retry
+        3. Mid-stream failure (chunks already yielded) → don't retry, yield error chunk
+        """
+        if max_tokens is self._SENTINEL:
+            max_tokens = self.generation.max_tokens
+        if temperature is self._SENTINEL:
+            temperature = self.generation.temperature
+        if reasoning_effort is self._SENTINEL:
+            reasoning_effort = self.generation.reasoning_effort
+
+        resolved_model = model or self.get_default_model()
+        provider_name = self.__class__.__name__
+        kw: dict[str, Any] = dict(
+            messages=messages, tools=tools, model=model,
+            max_tokens=max_tokens, temperature=temperature,
+            reasoning_effort=reasoning_effort, tool_choice=tool_choice,
+        )
+        logger.info("LLM stream request [{}] model={}", provider_name, resolved_model)
+
+        for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
+            first_chunk_received = False
+            try:
+                async for chunk in self.chat_stream(**kw):
+                    first_chunk_received = True
+                    yield chunk
+                    if chunk.finish_reason:
+                        # Log usage if present
+                        if chunk.usage:
+                            logger.info(
+                                "LLM stream done [{}] model={} attempt={} usage={}",
+                                provider_name, resolved_model, attempt, chunk.usage                            )
+                return  # stream completed successfully
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if first_chunk_received:
+                    # Mid-stream failure — don't retry
+                    logger.error(
+                        "LLM stream broke mid-way [{}] model={}: {}",
+                        provider_name, resolved_model, exc,
+                    )
+                    yield LLMStreamChunk(
+                        finish_reason="error",
+                        error_content=f"Stream interrupted: {exc}",
+                    )
+                    return
+
+                err_str = str(exc)
+                if not self._is_transient_error(err_str):
+                    # Non-transient — try without images, then give up
+                    stripped = self._strip_image_content(messages)
+                    if stripped is not None:
+                        logger.warning("Non-transient stream error with images, retrying without")
+                        try:
+                            async for chunk in self.chat_stream(**{**kw, "messages": stripped}):
+                                yield chunk
+                            return
+                        except Exception:
+                            pass
+                    yield LLMStreamChunk(
+                        finish_reason="error",
+                        error_content=f"Error calling LLM: {exc}",
+                    )
+                    return
+
+                logger.warning(
+                    "LLM stream transient error (attempt {}/{}), retrying in {}s: {}",
+                    attempt, len(self._CHAT_RETRY_DELAYS), delay, err_str[:120],
+                )
+                await asyncio.sleep(delay)
+
+        # Final attempt — no more retries
+        try:
+            async for chunk in self.chat_stream(**kw):
+                yield chunk
+        except Exception as exc:
+            yield LLMStreamChunk(
+                finish_reason="error",
+                error_content=f"Error calling LLM after retries: {exc}",
+            )

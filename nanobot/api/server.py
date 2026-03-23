@@ -15,6 +15,14 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
 
+from nanobot.agent.events import (
+    AgentEvent,
+    AgentResponse,
+    ResponseAccumulator,
+    agent_completed,
+    agent_failed,
+    agent_started,
+)
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
 
@@ -34,6 +42,7 @@ class ChatRequest(BaseModel):
     session_id: str = "default"
     flow_id: str | None = None
     metadata: dict | None = None  # frontend-provided metadata (files, etc.)
+    stream: bool = True  # default true for backwards compat
 
 
 def _authenticate_agent_request(
@@ -87,7 +96,17 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         mongo_client,
     )
     from nanobot.database.redis import init_redis, test_redis, redis_client
+    from nanobot.database.rabbitmq import (
+        init_rabbitmq,
+        start_mq_consumer,
+        close_rabbitmq,
+        get_reply_queue_name,
+        set_dispatch_fn,
+    )
     from nanobot.session.manager import SessionManager
+    from nanobot.workflow.engine import WorkflowEngine
+    from nanobot.workflow.task_publisher import run_flow
+    from nanobot.workflow.event_bridge import dispatch as event_dispatch
 
     # Initialize database connections (sync — creates clients, no I/O yet)
     init_mongo(config.mongodb.uri, config.mongodb.db, config.mongodb.agent_db)
@@ -109,8 +128,49 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         await test_mongo()
         await test_redis()
         await ensure_indexes()
+
+        # Startup: RabbitMQ consumer for workflow results
+        mq_connection = None
+        if cfg.workflow.deploy_id:
+            init_rabbitmq(
+                deploy_id=cfg.workflow.deploy_id,
+                num_workers=cfg.rabbitmq.num_workers,
+            )
+            mq_connection = await start_mq_consumer(
+                host=cfg.rabbitmq.host,
+                port=cfg.rabbitmq.port,
+                username=cfg.rabbitmq.username,
+                password=cfg.rabbitmq.password,
+                ssl=cfg.rabbitmq.ssl,
+                prefetch_count=cfg.rabbitmq.prefetch_count,
+            )
+
+            # Create WorkflowEngine and bind to app.state
+            from nanobot.database.mongo import flow_task_col
+            from nanobot.database.redis import redis_client as rc_for_engine
+            app.state.workflow_engine = WorkflowEngine(
+                redis_client=rc_for_engine,
+                flow_task_col=flow_task_col,
+                publish_fn=run_flow.publish,
+                reply_queue=get_reply_queue_name(),
+            )
+            app.state.config = cfg
+            set_dispatch_fn(event_dispatch)
+
+            # Register RunWorkflowTool into the agent's tool registry
+            from nanobot.agent.tools.opencreator import RunWorkflowTool
+            app.state.agent.tools.register(RunWorkflowTool(
+                api_base=cfg.api.internal_api_base,
+                workflow_engine=app.state.workflow_engine,
+            ))
+
+            logger.info(f"Workflow engine ready, reply_queue={get_reply_queue_name()}")
+
         yield
+
         # Shutdown
+        if mq_connection:
+            await close_rabbitmq()
         await app.state.agent.close_mcp()
         app.state.agent.stop()
         from nanobot.database.mongo import mongo_client
@@ -175,16 +235,13 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         }
 
         async def event_stream():
-            queue: asyncio.Queue = asyncio.Queue()
+            queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
 
-            async def on_progress(content: str, *, tool_hint: bool = False, event_type: str | None = None):
-                if event_type:
-                    await queue.put({"type": event_type, "content": content})
-                else:
-                    resolved_type = "tool" if tool_hint else "progress"
-                    await queue.put({"type": resolved_type, "content": content})
+            async def on_progress(event: AgentEvent):
+                await queue.put(event)
 
             async def run_agent():
+                await queue.put(agent_started(session_id))
                 try:
                     result = await app.state.agent.process_direct(
                         body.message,
@@ -197,20 +254,46 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                         user_id=auth_user.user_id,
                         workflow_id=flow_id,
                     )
-                    await queue.put({"type": "done", "content": result or ""})
+                    await queue.put(agent_completed(result or ""))
                 except Exception as e:
                     logger.exception("Agent error")
-                    await queue.put({"type": "error", "content": str(e)})
+                    await queue.put(agent_failed(str(e)))
 
             task = asyncio.create_task(run_agent())
             try:
                 while True:
                     event = await queue.get()
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                    if event["type"] in ("done", "error"):
+                    yield f"data: {json.dumps(event.to_dict(), ensure_ascii=False)}\n\n"
+                    if event.is_terminal:
                         break
             finally:
                 task.cancel()
+
+        if not body.stream:
+            # Non-streaming: collect events, build AgentResponse
+            accumulator = ResponseAccumulator()
+
+            async def collect_events(event: AgentEvent):
+                accumulator.feed(event)
+
+            accumulator.feed(agent_started(session_id))
+            try:
+                result = await app.state.agent.process_direct(
+                    body.message,
+                    session_key=session_id,
+                    channel="api",
+                    chat_id=auth_user.user_id,
+                    on_progress=collect_events,
+                    metadata={"flow_id": flow_id} if flow_id else None,
+                    private_context=private_context,
+                    user_id=auth_user.user_id,
+                    workflow_id=flow_id,
+                )
+                accumulator.feed(agent_completed(result or ""))
+            except Exception as e:
+                logger.exception("Agent error")
+                accumulator.feed(agent_failed(str(e)))
+            return accumulator.build().to_dict()
 
         return StreamingResponse(
             event_stream(),

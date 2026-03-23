@@ -165,6 +165,25 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+class RabbitMQConfig(Base):
+    """RabbitMQ connection configuration (for workflow result consumption)."""
+
+    host: str = ""
+    port: int = 5671
+    username: str = ""
+    password: str = ""
+    ssl: bool = True  # AWS MQ requires SSL
+    num_workers: int = 3  # MD5 hash routing workers for message ordering
+    prefetch_count: int = 1000
+
+
+class WorkflowConfig(Base):
+    """Workflow execution configuration."""
+
+    deploy_id: str = ""  # Instance identifier, e.g. "agent-prod-1". Must be fixed, not random.
+    run_flow_queue: str = "run_flow"  # Redis Stream queue name (same as Publisher/Consumer)
+
+
 class MongoDBConfig(Base):
     """MongoDB connection configuration."""
 
@@ -194,6 +213,8 @@ class Config(BaseSettings):
     api: ApiServerConfig = Field(default_factory=ApiServerConfig)
     mongodb: MongoDBConfig = Field(default_factory=MongoDBConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
+    rabbitmq: RabbitMQConfig = Field(default_factory=RabbitMQConfig)
+    workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
 
     @property
     def workspace_path(self) -> Path:
