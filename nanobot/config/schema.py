@@ -182,7 +182,6 @@ class SentryConfig(Base):
 
     dsn: str = ""  # Sentry DSN, empty = disabled
     environment: str = "development"  # e.g. "production", "staging"
-    traces_sample_rate: float = 1.0  # 0.0 ~ 1.0
     profiles_sample_rate: float = 0.0  # 0.0 ~ 1.0
     send_default_pii: bool = False
 
