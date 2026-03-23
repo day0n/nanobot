@@ -182,7 +182,7 @@
 - 输入：`text` 必填
 - 输出：`image`
 - 最大输入连线：无限制
-- 默认模型：`["fal-ai/nano-banana"]`
+- 默认模型：`["minimax/hailuo-image-01"]`
 - 附加字段：`lensStyleEnabled`=`false`，`lensStyle.camera_style`=`"none"`，`lensStyle.lens_preset`=`"none"`，`lensStyle.focal_length`=`"none"`，`lensStyle.lighting_style`=`"none"`
 - 运行要求：`selectedModels.length > 0`；`inputText` 有内容或有 `text` 上游
 - **需要强制 selectedModels 校验**
@@ -396,8 +396,8 @@
 {
   "label": "Node Name",
   "description": "Node Description",
-  "themeColor": "#73ADFF",
-  "modelCardColor": "#73ADFF",
+  "themeColor": "#217EFF",
+  "modelCardColor": "#217EFF",
   "selectedModels": ["model-id"],
   "inputText": "",
   "imageBase64": "",
@@ -415,7 +415,7 @@
 {
   "label": "Node Name",
   "description": "Node Description",
-  "themeColor": "#73ADFF",
+  "themeColor": "#217EFF",
   "selectedModels": [],
   "inputText": "",
   "imageBase64": "",
@@ -443,8 +443,8 @@
   "data": {
     "label": "Text Generator",
     "description": "Generate high-quality text",
-    "themeColor": "#9DFF9E",
-    "modelCardColor": "#9DFF9E",
+    "themeColor": "#04FE06",
+    "modelCardColor": "#04FE06",
     "selectedModels": ["openai/gpt-4o-mini"],
     "inputText": "",
     "imageBase64": "",
