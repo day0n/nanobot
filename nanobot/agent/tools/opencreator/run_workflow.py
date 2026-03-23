@@ -107,7 +107,7 @@ class RunWorkflowTool(Tool):
             try:
                 import asyncio
                 while True:
-                    event = await asyncio.wait_for(event_queue.get(), timeout=300)
+                    event = await asyncio.wait_for(event_queue.get(), timeout=480)  # 8 minutes
                     yield event
                     et = event.get("event_type")
                     if et == "node_status" and event.get("status") == "select":
@@ -115,8 +115,9 @@ class RunWorkflowTool(Tool):
                     if et in ("finish_flow", "flow_killed"):
                         break
             except asyncio.TimeoutError:
-                logger.warning(f"RunWorkflowTool: timeout waiting for events, killing {flow_task_id}")
-                await self._engine.kill(flow_task_id)
+                # Don't kill — let Consumer finish in background.
+                # Results will be saved to assets automatically.
+                logger.info(f"RunWorkflowTool: 8min timeout, disconnecting SSE (not killing). {flow_task_id=}")
             except (asyncio.CancelledError, GeneratorExit):
                 await self._engine.kill(flow_task_id)
             finally:

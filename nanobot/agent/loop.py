@@ -295,6 +295,7 @@ class AgentLoop:
                                 "ws_id": result_obj.ws_id,
                             }))
                         result_str = "Workflow completed successfully"
+                        _stream_got_terminal = False
                         try:
                             async for raw_event in result_obj.event_stream:
                                 et = raw_event.get("event_type")
@@ -305,17 +306,32 @@ class AgentLoop:
                                 if et == "node_status" and raw_event.get("status") == "select":
                                     node_id = raw_event.get("node_id", "unknown")
                                     result_str = f"Workflow paused: node {node_id} needs user selection on the canvas."
+                                    _stream_got_terminal = True
                                     break
                                 if et == "node_status" and raw_event.get("status") == "failed":
                                     error_msg = raw_event.get("error_msg", "Node execution failed")
                                     result_str = f"Workflow failed: {error_msg}"
+                                    _stream_got_terminal = True
                                     break
                                 if et in ("finish_flow", "flow_killed"):
+                                    _stream_got_terminal = True
                                     break
                         except Exception as stream_err:
                             logger.error("Workflow event stream error: {}", stream_err)
                             error_msg = str(stream_err)
                             result_str = f"Error consuming workflow events: {stream_err}"
+                            _stream_got_terminal = True
+
+                        # If stream ended without a terminal event, it was a timeout.
+                        # Don't kill — Consumer continues in background, results saved to assets.
+                        if not _stream_got_terminal:
+                            result_str = (
+                                "The workflow is still generating and may take a bit longer. "
+                                "Results will be saved automatically to your assets — nothing will be lost. "
+                                "You can leave or refresh the page, and check the assets page later. "
+                                "If generation fails, you will not be charged."
+                            )
+
                         # Recalculate duration after stream consumption
                         completed_at = _dt.now()
                         duration_ms = int((completed_at - started_at).total_seconds() * 1000)
