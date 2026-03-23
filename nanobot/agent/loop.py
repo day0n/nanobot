@@ -234,6 +234,13 @@ class AgentLoop:
 
             _llm_span = SafeSpan("gen_ai.request", f"chat {self.model}")
             _llm_span.set_data("gen_ai.request.model", self.model)
+            tool_names = [t.get("function", {}).get("name", "") for t in (tool_defs or [])]
+            if tool_names:
+                _llm_span.set_data("gen_ai.request.available_tools", json.dumps(tool_names))
+            try:
+                _llm_span.set_data("gen_ai.request.messages", json.dumps(messages, ensure_ascii=False, default=str)[:8192])
+            except Exception:
+                pass
             _llm_span.__enter__()
 
             try:
