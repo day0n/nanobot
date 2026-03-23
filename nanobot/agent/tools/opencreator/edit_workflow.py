@@ -23,7 +23,9 @@ class EditWorkflowTool(Tool):
     name = "edit_workflow"
     description = (
         "Update the workflow (nodes + edges) in the current canvas session. "
-        "Requires an authenticated canvas context with flow_id and user_id (both provided automatically). "
+        "IMPORTANT: This is a FULL REPLACEMENT — you must provide ALL nodes and edges, not just the changed ones. "
+        "Always call get_workflow FIRST to see the current canvas state, then modify the returned nodes/edges "
+        "and pass the complete list here. Skipping get_workflow will lose existing nodes and layout. "
         "The tool performs preflight normalization/validation to keep payloads frontend-compatible "
         "(node defaults, edge handle compatibility, dangling-edge cleanup). "
         "Each node MUST include a position with x/y coordinates for correct canvas layout."
