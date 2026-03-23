@@ -7,7 +7,7 @@ import json
 import os
 import re
 import sys
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -123,7 +123,12 @@ class AgentLoop:
         self._mcp_connecting = False
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._background_tasks: list[asyncio.Task] = []
-        self._processing_lock = asyncio.Lock()
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        # NANOBOT_MAX_CONCURRENT_REQUESTS: <=0 means unlimited; default 3.
+        _max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "3"))
+        self._concurrency_gate: asyncio.Semaphore | None = (
+            asyncio.Semaphore(_max) if _max > 0 else None
+        )
         self._pending_traces: list[dict] = []  # tool traces accumulated during _save_turn
         self._register_default_tools()
 
@@ -455,8 +460,10 @@ class AgentLoop:
         asyncio.create_task(_do_restart())
 
     async def _dispatch(self, msg: InboundMessage) -> None:
-        """Process a message under the global lock."""
-        async with self._processing_lock:
+        """Process a message: per-session serial, cross-session concurrent."""
+        lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
+        gate = self._concurrency_gate or nullcontext()
+        async with lock, gate:
             try:
                 response = await self._process_message(msg)
                 if response is not None:
@@ -819,21 +826,28 @@ class AgentLoop:
         user_id: str = "",
         workflow_id: str | None = None,
     ) -> str:
-        """Process a message directly (for CLI or cron usage)."""
+        """Process a message directly (for API/SSE or CLI usage).
+
+        Uses per-session lock so different users run concurrently while
+        messages within the same session remain serialised.
+        """
         await self._connect_mcp()
-        msg = InboundMessage(
-            channel=channel,
-            sender_id="user",
-            chat_id=chat_id,
-            content=content,
-            metadata=metadata or {},
-        )
-        response = await self._process_message(
-            msg,
-            session_key=session_key,
-            on_progress=on_progress,
-            private_context=private_context,
-            user_id=user_id,
-            workflow_id=workflow_id,
-        )
-        return response.content if response else ""
+        lock = self._session_locks.setdefault(session_key, asyncio.Lock())
+        gate = self._concurrency_gate or nullcontext()
+        async with lock, gate:
+            msg = InboundMessage(
+                channel=channel,
+                sender_id="user",
+                chat_id=chat_id,
+                content=content,
+                metadata=metadata or {},
+            )
+            response = await self._process_message(
+                msg,
+                session_key=session_key,
+                on_progress=on_progress,
+                private_context=private_context,
+                user_id=user_id,
+                workflow_id=workflow_id,
+            )
+            return response.content if response else ""
