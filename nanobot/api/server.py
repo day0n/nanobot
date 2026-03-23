@@ -87,6 +87,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     """Create the FastAPI application."""
     from contextlib import asynccontextmanager
 
+    from nanobot.sentry import init_sentry
     from nanobot.database.mongo import (
         init_mongo,
         test_mongo,
@@ -108,6 +109,9 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     from nanobot.workflow.engine import WorkflowEngine
     from nanobot.workflow.task_publisher import run_flow
     from nanobot.workflow.event_bridge import dispatch as event_dispatch
+
+    # Initialize Sentry before anything else
+    init_sentry(config.sentry)
 
     # Initialize database connections (sync — creates clients, no I/O yet)
     init_mongo(config.mongodb.uri, config.mongodb.db, config.mongodb.agent_db)

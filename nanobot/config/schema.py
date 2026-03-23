@@ -177,6 +177,16 @@ class RabbitMQConfig(Base):
     prefetch_count: int = 1000
 
 
+class SentryConfig(Base):
+    """Sentry monitoring configuration."""
+
+    dsn: str = ""  # Sentry DSN, empty = disabled
+    environment: str = "development"  # e.g. "production", "staging"
+    traces_sample_rate: float = 1.0  # 0.0 ~ 1.0
+    profiles_sample_rate: float = 0.0  # 0.0 ~ 1.0
+    send_default_pii: bool = False
+
+
 class WorkflowConfig(Base):
     """Workflow execution configuration."""
 
@@ -215,6 +225,7 @@ class Config(BaseSettings):
     redis: RedisConfig = Field(default_factory=RedisConfig)
     rabbitmq: RabbitMQConfig = Field(default_factory=RabbitMQConfig)
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
+    sentry: SentryConfig = Field(default_factory=SentryConfig)
 
     @property
     def workspace_path(self) -> Path:

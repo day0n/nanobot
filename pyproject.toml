@@ -59,6 +59,7 @@ dependencies = [
     "networkx==3.4.2",
     "funboost==52.8",
     "nanoid==2.0.0",
+    "sentry-sdk[fastapi]>=2.29.0,<3.0.0",
 ]
 
 [project.optional-dependencies]

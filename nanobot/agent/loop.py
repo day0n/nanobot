@@ -11,6 +11,7 @@ from contextlib import AsyncExitStack, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+import sentry_sdk
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
@@ -209,6 +210,13 @@ class AgentLoop:
         final_content = None
         tools_used: list[str] = []
         tool_timings: dict[str, dict] = {}
+        _agent_span = sentry_sdk.start_span(
+            op="gen_ai.invoke_agent",
+            name="invoke_agent opencreator_agent",
+        )
+        _agent_span.set_data("gen_ai.agent.name", "opencreator_agent")
+        _agent_span.set_data("gen_ai.request.model", self.model)
+        _agent_span.__enter__()
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -284,11 +292,24 @@ class AgentLoop:
                     started_at = _dt.now()
                     error_msg = None
                     result_obj: str | ToolResult | WorkflowExecution
+                    _tool_span = sentry_sdk.start_span(
+                        op="gen_ai.execute_tool",
+                        name=f"execute_tool {tool_call.name}",
+                    )
+                    _tool_span.set_data("gen_ai.tool.name", tool_call.name)
+                    _tool_span.set_data("gen_ai.tool.input", json.dumps(tool_call.arguments, ensure_ascii=False, default=str)[:4096])
+                    _tool_span.__enter__()
                     try:
                         result_obj = await self.tools.execute(tool_call.name, tool_call.arguments)
                     except Exception as e:
                         error_msg = str(e)
                         result_obj = f"Error: {e}"
+                        _tool_span.set_status("internal_error")
+                    finally:
+                        if not error_msg:
+                            output_str = result_obj if isinstance(result_obj, str) else str(getattr(result_obj, 'content', result_obj))
+                            _tool_span.set_data("gen_ai.tool.output", output_str[:4096])
+                        _tool_span.__exit__(None, None, None)
                     completed_at = _dt.now()
                     duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
@@ -401,6 +422,9 @@ class AgentLoop:
                 f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
                 "without completing the task. You can try breaking the task into smaller steps."
             )
+
+        _agent_span.set_data("gen_ai.response.text", (final_content or "")[:4096])
+        _agent_span.__exit__(None, None, None)
 
         return final_content, tools_used, messages, tool_timings
 
