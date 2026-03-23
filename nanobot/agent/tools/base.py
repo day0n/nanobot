@@ -98,9 +98,13 @@ class Tool(ABC):
             return obj
 
         props = schema.get("properties", {})
+        required = set(schema.get("required", []))
         result = {}
 
         for key, value in obj.items():
+            # Strip None values for optional params — LLMs often pass null to mean "omit"
+            if value is None and key not in required:
+                continue
             if key in props:
                 result[key] = self._cast_value(value, props[key])
             else:

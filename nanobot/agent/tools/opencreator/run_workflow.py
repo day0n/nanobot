@@ -116,22 +116,31 @@ class RunWorkflowTool(Tool):
 
         # 4. Return WorkflowExecution — loop.py will consume the event stream
         async def _event_stream():
+            _terminal_seen = False  # Track whether workflow reached a natural end
             try:
                 import asyncio
                 while True:
                     event = await asyncio.wait_for(event_queue.get(), timeout=480)  # 8 minutes
-                    yield event
                     et = event.get("event_type")
-                    if et == "node_status" and event.get("status") == "select":
-                        break
+                    # Mark terminal BEFORE yield — GeneratorExit arrives at the yield point,
+                    # so the flag must already be set by then.
                     if et in ("finish_flow", "flow_killed"):
+                        _terminal_seen = True
+                    if et == "node_status" and event.get("status") == "select":
+                        _terminal_seen = True
+                    yield event
+                    if _terminal_seen:
                         break
             except asyncio.TimeoutError:
                 # Don't kill — let Consumer finish in background.
                 # Results will be saved to assets automatically.
                 logger.info(f"RunWorkflowTool: 8min timeout, disconnecting SSE (not killing). {flow_task_id=}")
             except (asyncio.CancelledError, GeneratorExit):
-                await self._engine.kill(flow_task_id)
+                if not _terminal_seen:
+                    await self._engine.kill(flow_task_id)
+                    logger.info(f"RunWorkflowTool: stream cancelled, killed workflow. {flow_task_id=}")
+                else:
+                    logger.debug(f"RunWorkflowTool: stream closed after terminal event, no kill needed. {flow_task_id=}")
             finally:
                 unregister(ws_id)
 

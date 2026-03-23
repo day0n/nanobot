@@ -288,7 +288,14 @@ class AgentLoop:
                     duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
                     # Handle WorkflowExecution — consume event stream, emit workflow.* SSE events
-                    if isinstance(result_obj, WorkflowExecution):
+                    # Use hasattr as a robust check (avoids class-identity issues across reloads)
+                    _is_wf_exec = isinstance(result_obj, WorkflowExecution) or hasattr(result_obj, "event_stream")
+                    if _is_wf_exec and not isinstance(result_obj, (str, ToolResult)):
+                        if not isinstance(result_obj, WorkflowExecution):
+                            logger.warning(
+                                "WorkflowExecution isinstance failed! type={} id(class)={} expected_id={}",
+                                type(result_obj), id(type(result_obj)), id(WorkflowExecution),
+                            )
                         if on_progress:
                             await on_progress(workflow_started({
                                 "flow_task_id": result_obj.flow_task_id,
