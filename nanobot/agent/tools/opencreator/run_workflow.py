@@ -19,13 +19,25 @@ class RunWorkflowTool(Tool):
 
     name = "run_workflow"
     description = (
-        "Run the current workflow on the canvas. This will execute all connected nodes "
-        "in the workflow, calling AI models and producing outputs. Use this when the user "
-        "asks to run, execute, or start their workflow."
+        "Run the current workflow on the canvas. By default executes all connected nodes. "
+        "If node_ids is provided, only those specific nodes (and their upstream dependencies) "
+        "will be executed — this is single-node or selected-nodes run mode. "
+        "When the user @mentions a specific node or says 'run this node', extract the node ID "
+        "from the context and pass it in node_ids."
     )
     parameters = {
         "type": "object",
-        "properties": {},
+        "properties": {
+            "node_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional. List of node IDs to run. When provided, only these nodes "
+                    "and their upstream ancestors will execute. When omitted, the entire "
+                    "workflow runs. Node IDs look like 'textGenerator-1711234567890-abc123'."
+                ),
+            },
+        },
         "required": [],
     }
 
@@ -33,7 +45,7 @@ class RunWorkflowTool(Tool):
         self.api_base = api_base.strip() or _API_BASE
         self._engine = workflow_engine
 
-    async def execute(self, **_: Any) -> str | WorkflowExecution:
+    async def execute(self, node_ids: list[str] | None = None, **_: Any) -> str | WorkflowExecution:
         from nanoid import generate as nanoid_generate
         from nanobot.workflow.event_bridge import register, unregister
 
@@ -75,12 +87,16 @@ class RunWorkflowTool(Tool):
         event_queue = register(ws_id)
 
         # 3. Submit to Consumer via WorkflowEngine
+        start_ids = node_ids if node_ids else None
+        end_ids = node_ids if node_ids else None
         try:
             flow_task_id = await self._engine.submit_start(
                 nodes=nodes,
                 edges=edges,
                 ws_id=ws_id,
                 user_id=user_id or "",
+                start_ids=start_ids,
+                end_ids=end_ids,
             )
         except Exception as e:
             unregister(ws_id)
