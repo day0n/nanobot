@@ -211,13 +211,16 @@ class AgentLoop:
         final_content = None
         tools_used: list[str] = []
         tool_timings: dict[str, dict] = {}
-        _agent_span = sentry_sdk.start_span(
-            op="gen_ai.invoke_agent",
-            name="invoke_agent opencreator_agent",
-        )
-        _agent_span.set_data("gen_ai.agent.name", "opencreator_agent")
-        _agent_span.set_data("gen_ai.request.model", self.model)
-        _agent_span.__enter__()
+        try:
+            _agent_span = sentry_sdk.start_span(
+                op="gen_ai.invoke_agent",
+                name="invoke_agent opencreator_agent",
+            )
+            _agent_span.set_data("gen_ai.agent.name", "opencreator_agent")
+            _agent_span.set_data("gen_ai.request.model", self.model)
+            _agent_span.__enter__()
+        except Exception:
+            _agent_span = None
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -233,6 +236,17 @@ class AgentLoop:
             thinking_blocks = None
             reasoning_content = None
             usage: dict[str, int] = {}
+
+            # Sentry gen_ai.request span
+            _llm_span = None
+            try:
+                _llm_span = sentry_sdk.start_span(
+                    op="gen_ai.request", name=f"chat {self.model}",
+                )
+                _llm_span.set_data("gen_ai.request.model", self.model)
+                _llm_span.__enter__()
+            except Exception:
+                _llm_span = None
 
             try:
                 stream = self.provider.chat_stream_with_retry(
@@ -259,6 +273,16 @@ class AgentLoop:
             except asyncio.CancelledError:
                 await stream.aclose()
                 raise
+            finally:
+                try:
+                    if _llm_span:
+                        if usage:
+                            _llm_span.set_data("gen_ai.usage.input_tokens", usage.get("prompt_tokens", 0))
+                            _llm_span.set_data("gen_ai.usage.output_tokens", usage.get("completion_tokens", 0))
+                            _llm_span.set_data("gen_ai.usage.total_tokens", usage.get("total_tokens", 0))
+                        _llm_span.__exit__(None, None, None)
+                except Exception:
+                    pass
 
             # Reconstruct LLMResponse from accumulated chunks
             response = LLMResponse(
@@ -293,24 +317,33 @@ class AgentLoop:
                     started_at = _dt.now()
                     error_msg = None
                     result_obj: str | ToolResult | WorkflowExecution
-                    _tool_span = sentry_sdk.start_span(
-                        op="gen_ai.execute_tool",
-                        name=f"execute_tool {tool_call.name}",
-                    )
-                    _tool_span.set_data("gen_ai.tool.name", tool_call.name)
-                    _tool_span.set_data("gen_ai.tool.input", json.dumps(tool_call.arguments, ensure_ascii=False, default=str)[:4096])
-                    _tool_span.__enter__()
+                    _tool_span = None
+                    try:
+                        _tool_span = sentry_sdk.start_span(
+                            op="gen_ai.execute_tool",
+                            name=f"execute_tool {tool_call.name}",
+                        )
+                        _tool_span.set_data("gen_ai.tool.name", tool_call.name)
+                        _tool_span.set_data("gen_ai.tool.input", json.dumps(tool_call.arguments, ensure_ascii=False, default=str)[:4096])
+                        _tool_span.__enter__()
+                    except Exception:
+                        _tool_span = None
                     try:
                         result_obj = await self.tools.execute(tool_call.name, tool_call.arguments)
                     except Exception as e:
                         error_msg = str(e)
                         result_obj = f"Error: {e}"
-                        _tool_span.set_status("internal_error")
                     finally:
-                        if not error_msg:
-                            output_str = result_obj if isinstance(result_obj, str) else str(getattr(result_obj, 'content', result_obj))
-                            _tool_span.set_data("gen_ai.tool.output", output_str[:4096])
-                        _tool_span.__exit__(None, None, None)
+                        try:
+                            if _tool_span:
+                                if error_msg:
+                                    _tool_span.set_status("internal_error")
+                                else:
+                                    output_str = result_obj if isinstance(result_obj, str) else str(getattr(result_obj, 'content', result_obj))
+                                    _tool_span.set_data("gen_ai.tool.output", output_str[:4096])
+                                _tool_span.__exit__(None, None, None)
+                        except Exception:
+                            pass
                     completed_at = _dt.now()
                     duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
@@ -424,8 +457,12 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        _agent_span.set_data("gen_ai.response.text", (final_content or "")[:4096])
-        _agent_span.__exit__(None, None, None)
+        try:
+            if _agent_span:
+                _agent_span.set_data("gen_ai.response.text", (final_content or "")[:4096])
+                _agent_span.__exit__(None, None, None)
+        except Exception:
+            pass
 
         return final_content, tools_used, messages, tool_timings
 
@@ -550,17 +587,20 @@ class AgentLoop:
         ctx = dict(private_context or {})
         request_ctx_token = set_request_context(ctx)
 
-        # Start a Sentry transaction so spans are captured even inside asyncio.create_task
-        _txn = sentry_sdk.start_transaction(
-            op="agent.chat",
-            name="agent.process_message",
-        )
-        _txn.__enter__()
-        if user_id:
-            sentry_sdk.set_user({"id": user_id})
-        sentry_sdk.set_tag("channel", msg.channel)
-        if session_key or msg.session_key:
+        # Start a Sentry transaction manually — SSE streaming runs in create_task,
+        # so the FastAPI auto-transaction is already closed by the time agent finishes.
+        _txn = None
+        try:
+            _txn = sentry_sdk.start_transaction(
+                op="agent.chat", name="agent.process_message",
+            )
+            _txn.__enter__()
+            if user_id:
+                sentry_sdk.set_user({"id": user_id})
+            sentry_sdk.set_tag("channel", msg.channel)
             sentry_sdk.set_tag("session_key", session_key or msg.session_key)
+        except Exception:
+            _txn = None
 
         # System messages: parse origin from chat_id ("channel:chat_id")
         try:
@@ -680,7 +720,11 @@ class AgentLoop:
                 metadata=msg.metadata or {},
             )
         finally:
-            _txn.__exit__(None, None, None)
+            try:
+                if _txn:
+                    _txn.__exit__(None, None, None)
+            except Exception:
+                pass
             reset_request_context(request_ctx_token)
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int, tool_timings: dict[str, dict] | None = None) -> None:

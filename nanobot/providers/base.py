@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
 
+import sentry_sdk
 from loguru import logger
 
 
