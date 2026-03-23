@@ -1,7 +1,6 @@
 """LiteLLM provider implementation for multi-provider support."""
 
 import hashlib
-import json
 import os
 import secrets
 import string
@@ -9,7 +8,6 @@ from typing import Any
 
 import json_repair
 import litellm
-import sentry_sdk
 from litellm import acompletion
 from loguru import logger
 
@@ -280,34 +278,8 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tool_choice"] = tool_choice or "auto"
 
         try:
-            with sentry_sdk.start_span(op="gen_ai.request", name=f"chat {original_model}") as span:
-                span.set_data("gen_ai.request.model", original_model)
-                span.set_data("gen_ai.request.max_tokens", max_tokens)
-                span.set_data("gen_ai.request.temperature", temperature)
-                # Record input messages (truncate to avoid bloating spans)
-                try:
-                    msgs_summary = json.dumps(messages, ensure_ascii=False, default=str)
-                    span.set_data("gen_ai.request.messages", msgs_summary[:8192])
-                except Exception:
-                    pass
-                if tools:
-                    tool_names = [t.get("function", {}).get("name", "") for t in tools]
-                    span.set_data("gen_ai.request.available_tools", json.dumps(tool_names))
-
-                response = await acompletion(**kwargs)
-                parsed = self._parse_response(response)
-
-                if parsed.usage:
-                    span.set_data("gen_ai.usage.input_tokens", parsed.usage.get("prompt_tokens", 0))
-                    span.set_data("gen_ai.usage.output_tokens", parsed.usage.get("completion_tokens", 0))
-                    span.set_data("gen_ai.usage.total_tokens", parsed.usage.get("total_tokens", 0))
-                if parsed.content:
-                    span.set_data("gen_ai.response.text", parsed.content[:4096])
-                if parsed.tool_calls:
-                    tc_summary = [{"name": tc.name, "id": tc.id} for tc in parsed.tool_calls]
-                    span.set_data("gen_ai.response.tool_calls", json.dumps(tc_summary))
-
-                return parsed
+            response = await acompletion(**kwargs)
+            return self._parse_response(response)
         except Exception as e:
             # Return error as content for graceful handling
             return LLMResponse(
