@@ -369,11 +369,12 @@ class VertexGeminiProvider(LLMProvider):
         accumulated_tool_calls: list[ToolCallRequest] = []
         accumulated_thinking: list[dict[str, Any]] = []
 
-        async for chunk in client.aio.models.generate_content_stream(
+        stream = await client.aio.models.generate_content_stream(
             model=model_name,
             contents=contents,
             config=config,
-        ):
+        )
+        async for chunk in stream:
             candidate = chunk.candidates[0] if chunk.candidates else None
             if not candidate or not candidate.content or not candidate.content.parts:
                 continue
