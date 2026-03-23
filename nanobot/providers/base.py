@@ -429,7 +429,19 @@ class LLMProvider(ABC):
             max_tokens=max_tokens, temperature=temperature,
             reasoning_effort=reasoning_effort, tool_choice=tool_choice,
         )
-        logger.info("LLM stream request [{}] model={}", provider_name, resolved_model)
+        # Log request summary (once, before streaming starts)
+        sys_preview = ""
+        if messages:
+            for m in messages:
+                if m.get("role") == "system":
+                    raw = m.get("content", "")
+                    sys_preview = (raw[:300] + "...") if len(raw) > 300 else raw
+                    break
+        tool_names = [t.get("function", {}).get("name", "?") for t in (tools or [])]
+        logger.info(
+            "LLM stream request [{}] model={} messages={} tools={} system_preview={}",
+            provider_name, resolved_model, len(messages), tool_names, sys_preview,
+        )
 
         for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
             first_chunk_received = False
