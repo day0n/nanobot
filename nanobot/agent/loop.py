@@ -15,7 +15,8 @@ from loguru import logger
 
 from nanobot.sentry import SafeSpan, SafeTransaction, set_sentry_context
 
-from nanobot.agent.context import ContextBuilder
+from nanobot.agent.prompt import PromptBuilder
+from nanobot.agent.prompt.runtime import RUNTIME_CONTEXT_TAG
 from nanobot.agent.events import (
     AgentEvent,
     WORKFLOW_EVENT_MAP,
@@ -102,7 +103,7 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
 
-        self.context = ContextBuilder(workspace)
+        self.context = PromptBuilder(workspace)
         if session_manager is None:
             raise ValueError("session_manager is required (must not be None)")
         self.sessions = session_manager
@@ -133,6 +134,11 @@ class AgentLoop:
         )
         self._pending_traces: list[dict] = []  # tool traces accumulated during _save_turn
         self._register_default_tools()
+        self._sync_tool_names()
+
+    def _sync_tool_names(self) -> None:
+        """Sync registered tool names to PromptBuilder so the system prompt stays accurate."""
+        self.context.set_tool_names(self.tools.tool_names)
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -721,7 +727,7 @@ class AgentLoop:
 
             # --- User message cleanup ---
             if role == "user":
-                if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+                if isinstance(content, str) and content.startswith(RUNTIME_CONTEXT_TAG):
                     parts = content.split("\n\n", 1)
                     if len(parts) > 1 and parts[1].strip():
                         entry["content"] = parts[1]
@@ -730,7 +736,7 @@ class AgentLoop:
                 if isinstance(content, list):
                     filtered = []
                     for c in content:
-                        if c.get("type") == "text" and isinstance(c.get("text"), str) and c["text"].startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+                        if c.get("type") == "text" and isinstance(c.get("text"), str) and c["text"].startswith(RUNTIME_CONTEXT_TAG):
                             continue
                         if (c.get("type") == "image_url"
                                 and c.get("image_url", {}).get("url", "").startswith("data:image/")):

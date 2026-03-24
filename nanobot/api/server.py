@@ -168,6 +168,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                 api_base=cfg.api.internal_api_base,
                 workflow_engine=app.state.workflow_engine,
             ))
+            app.state.agent._sync_tool_names()  # update prompt after dynamic tool registration
 
             logger.info(f"Workflow engine ready, reply_queue={get_reply_queue_name()}")
 

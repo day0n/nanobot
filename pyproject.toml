@@ -96,9 +96,8 @@ allow-direct-references = true
 [tool.hatch.build]
 include = [
     "nanobot/**/*.py",
-    "nanobot/prompt/**/*.md",
-    "nanobot/skills/**/*.md",
-    "nanobot/skills/**/*.sh",
+    "nanobot/agent/skills/**/*.md",
+    "nanobot/agent/skills/**/*.sh",
 ]
 
 [tool.hatch.build.targets.wheel]
