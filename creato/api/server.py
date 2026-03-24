@@ -88,7 +88,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     from contextlib import asynccontextmanager
 
     from creato.sentry import init_sentry
-    from creato.posthog import init_posthog, shutdown_posthog
+    from creato.posthog import init_posthog, shutdown_posthog, identify_user
     from creato.database.mongo import (
         init_mongo,
         test_mongo,
@@ -223,6 +223,21 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     )
     app.state.agent = agent
 
+    # PostHog: background identify (fire-and-forget, skips if already cached)
+    from creato.posthog import _identified_users
+
+    async def _posthog_identify(user_id: str) -> None:
+        if user_id in _identified_users:
+            return  # Already identified this process, zero cost
+        try:
+            user_doc = await db["user"].find_one(
+                {"user_id": user_id}, {"user_email": 1},
+            )
+            if user_doc and user_doc.get("user_email"):
+                identify_user(user_id, user_doc["user_email"])
+        except Exception:
+            pass
+
     # ---- POST /v1/agent/chat — SSE streaming chat ----
 
     @app.post("/v1/agent/chat")
@@ -232,6 +247,10 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         x_time_zone: str | None = Header(default=None, alias="X-Time-Zone"),
     ):
         auth_user = _authenticate_agent_request(authorization, cfg)
+
+        # PostHog: identify user with email (fire-and-forget, never blocks chat)
+        asyncio.create_task(_posthog_identify(auth_user.user_id))
+
         flow_id = body.flow_id.strip() if isinstance(body.flow_id, str) and body.flow_id.strip() else None
 
         # session_id is passed directly from frontend as the primary key

@@ -57,6 +57,45 @@ def shutdown_posthog() -> None:
 
 
 # ---------------------------------------------------------------------------
+# User identification — link Clerk user_id with email for PostHog
+# ---------------------------------------------------------------------------
+
+_identified_users: set[str] = set()  # avoid repeated identify calls per process
+
+
+def identify_user(user_id: str, email: str) -> None:
+    """Identify a user in PostHog, linking user_id with email.
+
+    Also creates an alias so that publisher events (distinct_id=email)
+    and agent events (distinct_id=user_id) merge into one PostHog person.
+
+    Called once per user per process lifetime (cached in _identified_users).
+    """
+    if _client is None or not user_id or not email:
+        return
+    if user_id in _identified_users:
+        return
+    _identified_users.add(user_id)
+
+    try:
+        # Set user properties (email visible in PostHog UI)
+        _client.identify(
+            distinct_id=user_id,
+            properties={
+                "email": email,
+                "$email": email,  # PostHog's built-in email property
+            },
+        )
+        # Alias: merge publisher's email-based events with agent's user_id-based events
+        _client.alias(
+            previous_id=email,
+            distinct_id=user_id,
+        )
+    except Exception as e:
+        logger.debug("PostHog identify/alias failed: {}", e)
+
+
+# ---------------------------------------------------------------------------
 # Context propagation via contextvars
 # ---------------------------------------------------------------------------
 
