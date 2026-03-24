@@ -89,7 +89,8 @@ class EditWorkflowTool(Tool):
         flow_id = flow_id.strip()
 
         normalized_nodes, id_map, node_warnings = _normalize_nodes(nodes)
-        if not normalized_nodes:
+        if not normalized_nodes and nodes:
+            # Caller provided nodes but all were invalid — report the errors.
             warning_text = "\n".join(f"- {w}" for w in node_warnings[:20]) if node_warnings else ""
             return (
                 "Error: no valid nodes left after preflight normalization.\n"
