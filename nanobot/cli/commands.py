@@ -38,6 +38,7 @@ from nanobot.config.schema import Config
 
 app = typer.Typer(
     name="nanobot",
+    context_settings={"help_option_names": ["-h", "--help"]},
     help=f"{__logo__} nanobot - Personal AI Assistant",
     no_args_is_help=True,
 )
