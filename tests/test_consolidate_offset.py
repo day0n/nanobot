@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nanobot.bus.events import InboundMessage
-from nanobot.bus.queue import MessageBus
-from nanobot.providers.base import LLMResponse
-from nanobot.session.manager import Session, SessionManager
+from creato.bus.events import InboundMessage
+from creato.bus.queue import MessageBus
+from creato.providers.base import LLMResponse
+from creato.session.manager import Session, SessionManager
 
 
 def create_session_with_messages(key: str, count: int, role: str = "user") -> Session:
@@ -94,7 +94,7 @@ class TestUserScopedStorage:
 
     def test_legacy_global_session_migrates_to_user_directory(self, tmp_path, monkeypatch) -> None:
         legacy_dir = tmp_path / "legacy-sessions"
-        monkeypatch.setattr("nanobot.session.manager.get_legacy_sessions_dir", lambda: legacy_dir)
+        monkeypatch.setattr("creato.session.manager.get_legacy_sessions_dir", lambda: legacy_dir)
         manager = SessionManager(Path(tmp_path))
         messages = [{"role": "user", "content": "hello", "timestamp": "2026-01-01T00:00:00"}]
         legacy_path = legacy_dir / "api_user-123_thread-2.jsonl"
@@ -130,7 +130,7 @@ class TestSessionRuntime:
 
     @staticmethod
     def _make_loop(tmp_path: Path):
-        from nanobot.agent.loop import AgentLoop
+        from creato.agent.loop import AgentLoop
 
         provider = MagicMock()
         provider.get_default_model.return_value = "test-model"

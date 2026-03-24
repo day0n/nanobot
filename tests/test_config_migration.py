@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
-from nanobot.cli.commands import app
-from nanobot.config.loader import load_config, save_config
+from creato.cli.commands import app
+from creato.config.loader import load_config, save_config
 
 runner = CliRunner()
 
@@ -74,8 +74,8 @@ def test_onboard_refresh_rewrites_legacy_config_template(tmp_path, monkeypatch) 
         encoding="utf-8",
     )
 
-    monkeypatch.setattr("nanobot.config.loader.get_config_path", lambda: config_path)
-    monkeypatch.setattr("nanobot.cli.commands.get_workspace_path", lambda _workspace=None: workspace)
+    monkeypatch.setattr("creato.config.loader.get_config_path", lambda: config_path)
+    monkeypatch.setattr("creato.cli.commands.get_workspace_path", lambda _workspace=None: workspace)
 
     result = runner.invoke(app, ["onboard"], input="n\n")
 
@@ -106,10 +106,10 @@ def test_onboard_refresh_backfills_missing_channel_fields(tmp_path, monkeypatch)
         encoding="utf-8",
     )
 
-    monkeypatch.setattr("nanobot.config.loader.get_config_path", lambda: config_path)
-    monkeypatch.setattr("nanobot.cli.commands.get_workspace_path", lambda _workspace=None: workspace)
+    monkeypatch.setattr("creato.config.loader.get_config_path", lambda: config_path)
+    monkeypatch.setattr("creato.cli.commands.get_workspace_path", lambda _workspace=None: workspace)
     monkeypatch.setattr(
-        "nanobot.channels.registry.discover_all",
+        "creato.channels.registry.discover_all",
         lambda: {
             "qq": SimpleNamespace(
                 default_config=lambda: {

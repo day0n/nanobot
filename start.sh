@@ -2,8 +2,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PORT="${NANOBOT_PORT:-18791}"
-LOG_FILE="/tmp/nanobot.log"
+PORT="${CREATO_PORT:-18791}"
+LOG_FILE="/tmp/creato.log"
 UV="$HOME/.local/bin/uv"
 ENV_FILE="$SCRIPT_DIR/.env.local"
 
@@ -28,12 +28,12 @@ PID=$(lsof -ti tcp:"$PORT" 2>/dev/null || true)
 if [ -n "$PID" ]; then
     kill "$PID" && sleep 1 && echo "  已终止 PID $PID"
 else
-    pkill -f "nanobot serve" 2>/dev/null && sleep 1 && echo "  已终止旧进程" || echo "  无旧进程"
+    pkill -f "creato serve" 2>/dev/null && sleep 1 && echo "  已终止旧进程" || echo "  无旧进程"
 fi
 
-echo "[4/4] 启动 nanobot (port $PORT, log: $LOG_FILE)..."
+echo "[4/4] 启动 creato (port $PORT, log: $LOG_FILE)..."
 echo "  以前台模式启动，日志将同时输出到终端和 $LOG_FILE"
 echo "  按 Ctrl+C 可停止服务"
 
-env PYTHONPATH="$SCRIPT_DIR" "$SCRIPT_DIR/.venv/bin/nanobot" serve --port "$PORT" \
+env PYTHONPATH="$SCRIPT_DIR" "$SCRIPT_DIR/.venv/bin/creato" serve --port "$PORT" \
     2>&1 | tee "$LOG_FILE"

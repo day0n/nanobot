@@ -6,8 +6,8 @@ from datetime import datetime as real_datetime
 from pathlib import Path
 import datetime as datetime_module
 
-from nanobot.agent.prompt import PromptBuilder
-from nanobot.agent.prompt.runtime import RUNTIME_CONTEXT_TAG
+from creato.agent.prompt import PromptBuilder
+from creato.agent.prompt.runtime import RUNTIME_CONTEXT_TAG
 
 
 class _FakeDatetime(real_datetime):
