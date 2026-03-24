@@ -6,6 +6,7 @@ mirroring the pattern used by creato/sentry.py.
 
 from __future__ import annotations
 
+import json
 import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -247,9 +248,77 @@ def capture_trace(
         logger.debug("PostHog trace capture failed: {}", e)
 
 
+def capture_span(
+    *,
+    span_id: str = "",
+    name: str,
+    input_data: Any = None,
+    output_data: Any = None,
+    latency: float = 0.0,
+    is_error: bool = False,
+    error: str | None = None,
+) -> None:
+    """Capture an $ai_span event to PostHog (e.g. tool execution).
+
+    Silent no-op when PostHog is not initialized.
+    """
+    if _client is None:
+        return
+
+    ctx = _posthog_ctx.get()
+    if not ctx.trace_id:
+        return
+
+    distinct_id = ctx.distinct_id or "anonymous"
+
+    properties: dict[str, Any] = {
+        "$ai_trace_id": ctx.trace_id,
+        "$ai_span_name": name,
+        "$ai_latency": round(latency, 3),
+        "$ai_is_error": is_error,
+    }
+
+    if span_id:
+        properties["$ai_span_id"] = span_id
+    if ctx.session_id:
+        properties["$ai_session_id"] = ctx.session_id
+
+    if not _privacy_mode:
+        if input_data is not None:
+            properties["$ai_input_state"] = _truncate_any(input_data, 8000)
+        if output_data is not None:
+            properties["$ai_output_state"] = _truncate_any(output_data, 8000)
+
+    if error:
+        properties["$ai_error"] = error[:2000]
+
+    if ctx.properties:
+        properties.update(ctx.properties)
+
+    try:
+        _client.capture(
+            distinct_id=distinct_id,
+            event="$ai_span",
+            properties=properties,
+        )
+    except Exception as e:
+        logger.debug("PostHog span capture failed: {}", e)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _truncate_any(value: Any, max_len: int) -> Any:
+    """Truncate a value for PostHog payload size control."""
+    if isinstance(value, str):
+        return value[:max_len]
+    if isinstance(value, dict):
+        s = json.dumps(value, ensure_ascii=False, default=str)
+        if len(s) > max_len:
+            return s[:max_len] + "..."
+        return value
+    return value
 
 def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sanitize messages for PostHog — redact large data URLs and cap size."""

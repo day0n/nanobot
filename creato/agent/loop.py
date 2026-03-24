@@ -16,6 +16,7 @@ from loguru import logger
 from creato.sentry import SafeSpan, SafeTransaction, set_sentry_context
 
 from creato.posthog import (
+    capture_span,
     capture_trace,
     posthog_timer,
     reset_posthog_context,
@@ -419,6 +420,17 @@ class AgentLoop:
                         "error": error_msg,
                         "raw_output": result_str,
                     }
+
+                    # PostHog tool execution span
+                    capture_span(
+                        span_id=tool_call.id,
+                        name=tool_call.name,
+                        input_data=tool_call.arguments,
+                        output_data=result_str if isinstance(result_str, str) else str(result_str),
+                        latency=duration_ms / 1000.0,
+                        is_error=bool(error_msg),
+                        error=error_msg,
+                    )
 
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result_str
