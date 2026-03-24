@@ -88,6 +88,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     from contextlib import asynccontextmanager
 
     from creato.sentry import init_sentry
+    from creato.posthog import init_posthog, shutdown_posthog
     from creato.database.mongo import (
         init_mongo,
         test_mongo,
@@ -112,6 +113,9 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
 
     # Initialize Sentry before anything else
     init_sentry(config.sentry)
+
+    # Initialize PostHog LLM Analytics
+    init_posthog(config.posthog)
 
     # Initialize database connections (sync — creates clients, no I/O yet)
     init_mongo(config.mongodb.uri, config.mongodb.db, config.mongodb.agent_db)
@@ -175,6 +179,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         yield
 
         # Shutdown
+        shutdown_posthog()
         if mq_connection:
             await close_rabbitmq()
         await app.state.agent.close_mcp()

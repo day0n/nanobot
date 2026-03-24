@@ -15,6 +15,13 @@ from loguru import logger
 
 from creato.sentry import SafeSpan, SafeTransaction, set_sentry_context
 
+from creato.posthog import (
+    capture_trace,
+    posthog_timer,
+    reset_posthog_context,
+    set_posthog_context,
+)
+
 from creato.agent.prompt import PromptBuilder
 from creato.agent.prompt.runtime import RUNTIME_CONTEXT_TAG
 from creato.agent.events import (
@@ -567,6 +574,17 @@ class AgentLoop:
         ctx = dict(private_context or {})
         request_ctx_token = set_request_context(ctx)
 
+        # PostHog LLM Analytics context
+        import uuid as _uuid
+        _posthog_trace_id = _uuid.uuid4().hex
+        _posthog_token = set_posthog_context(
+            trace_id=_posthog_trace_id,
+            session_id=session_key or msg.session_key,
+            distinct_id=user_id,
+        )
+        _posthog_start = posthog_timer()
+        _posthog_final_content: str | None = None
+
         # Start a Sentry transaction manually — SSE streaming runs in create_task,
         # so the FastAPI auto-transaction is already closed by the time agent finishes.
         _txn = SafeTransaction("agent.chat", "agent.process_message")
@@ -597,6 +615,7 @@ class AgentLoop:
                     current_role=current_role,
                 )
                 final_content, _, all_msgs, tool_timings = await self._run_agent_loop(messages)
+                _posthog_final_content = final_content
                 self._save_turn(session, all_msgs, 1 + len(history), tool_timings)
                 await self.sessions.save(session, tool_traces=self._pending_traces)
                 self._pending_traces = []
@@ -671,6 +690,7 @@ class AgentLoop:
 
             if final_content is None:
                 final_content = "I've completed processing but have no response to give."
+            _posthog_final_content = final_content
 
             self._save_turn(session, all_msgs, 1 + len(history), tool_timings)
             await self.sessions.save(session, tool_traces=self._pending_traces)
@@ -696,6 +716,16 @@ class AgentLoop:
         finally:
             _txn.__exit__(None, None, None)
             reset_request_context(request_ctx_token)
+            # PostHog trace-level event (skip for slash commands that don't invoke LLM)
+            if _posthog_final_content is not None:
+                capture_trace(
+                    input_state=msg.content[:2000] if msg.content else None,
+                    output_state=_posthog_final_content[:2000],
+                    latency=posthog_timer() - _posthog_start,
+                    is_error=False,
+                    name="agent_chat",
+                )
+            reset_posthog_context(_posthog_token)
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int, tool_timings: dict[str, dict] | None = None) -> None:
         """Save new-turn messages into session, splitting into display/LLM/trace roles.

@@ -489,11 +489,15 @@ def agent(
     from creato.bus.queue import MessageBus
     from creato.database.mongo import init_mongo, test_mongo, ensure_indexes
     from creato.database.redis import init_redis, test_redis
+    from creato.posthog import init_posthog
 
     config = _load_runtime_config(config, workspace)
 
     bus = MessageBus()
     provider = _make_provider(config)
+
+    # Initialize PostHog LLM Analytics
+    init_posthog(config.posthog)
 
     # Initialize database connections
     init_mongo(config.mongodb.uri, config.mongodb.db, config.mongodb.agent_db)

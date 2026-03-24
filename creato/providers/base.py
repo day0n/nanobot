@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
@@ -261,6 +262,46 @@ class LLMProvider(ABC):
                 result.append(msg)
         return result if found else None
 
+    def _posthog_capture(
+        self,
+        *,
+        resolved_model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        response: LLMResponse,
+        start_time: float,
+        stream: bool = False,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> None:
+        """Emit a PostHog $ai_generation event (silent no-op if not configured)."""
+        try:
+            from creato.posthog import capture_generation
+            latency = time.monotonic() - start_time
+            is_error = response.finish_reason == "error"
+            tc_dicts = [
+                {"name": tc.name, "arguments": tc.arguments}
+                for tc in response.tool_calls
+            ] if response.tool_calls else None
+            capture_generation(
+                model=resolved_model,
+                provider=self.__class__.__name__,
+                messages=messages,
+                output_content=response.content,
+                output_tool_calls=tc_dicts,
+                input_tokens=response.usage.get("prompt_tokens", 0),
+                output_tokens=response.usage.get("completion_tokens", 0),
+                latency=latency,
+                is_error=is_error,
+                error=response.content if is_error else None,
+                tools=tools,
+                stream=stream,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception:
+            pass  # Never let analytics break LLM calls
+
     async def _safe_chat(self, **kwargs: Any) -> LLMResponse:
         """Call chat() and convert unexpected exceptions to error responses."""
         try:
@@ -295,6 +336,12 @@ class LLMProvider(ABC):
 
         resolved_model = model or self.get_default_model()
         provider_name = self.__class__.__name__
+        _ph_start = time.monotonic()
+        _ph_common = dict(
+            resolved_model=resolved_model, messages=messages, tools=tools,
+            temperature=float(temperature) if isinstance(temperature, (int, float)) else None,
+            max_tokens=int(max_tokens) if isinstance(max_tokens, (int, float)) else None,
+        )
         kw: dict[str, Any] = dict(
             messages=messages, tools=tools, model=model,
             max_tokens=max_tokens, temperature=temperature,
@@ -344,13 +391,17 @@ class LLMProvider(ABC):
             )
 
             if response.finish_reason != "error":
+                self._posthog_capture(**_ph_common, response=response, start_time=_ph_start)
                 return response
 
             if not self._is_transient_error(response.content):
                 stripped = self._strip_image_content(messages)
                 if stripped is not None:
                     logger.warning("Non-transient LLM error with image content, retrying without images")
-                    return await self._safe_chat(**{**kw, "messages": stripped})
+                    fallback = await self._safe_chat(**{**kw, "messages": stripped})
+                    self._posthog_capture(**_ph_common, response=fallback, start_time=_ph_start)
+                    return fallback
+                self._posthog_capture(**_ph_common, response=response, start_time=_ph_start)
                 return response
 
             logger.warning(
@@ -360,7 +411,9 @@ class LLMProvider(ABC):
             )
             await asyncio.sleep(delay)
 
-        return await self._safe_chat(**kw)
+        final = await self._safe_chat(**kw)
+        self._posthog_capture(**_ph_common, response=final, start_time=_ph_start)
+        return final
 
     @abstractmethod
     def get_default_model(self) -> str:
@@ -424,6 +477,12 @@ class LLMProvider(ABC):
 
         resolved_model = model or self.get_default_model()
         provider_name = self.__class__.__name__
+        _ph_start = time.monotonic()
+        _ph_usage: dict[str, int] = {}
+        _ph_content_parts: list[str] = []
+        _ph_tool_calls: list[dict] = []
+        _ph_is_error = False
+        _ph_error: str | None = None
         kw: dict[str, Any] = dict(
             messages=messages, tools=tools, model=model,
             max_tokens=max_tokens, temperature=temperature,
@@ -443,11 +502,51 @@ class LLMProvider(ABC):
             provider_name, resolved_model, len(messages), tool_names, sys_preview,
         )
 
+        def _ph_accumulate(chunk: LLMStreamChunk) -> None:
+            """Accumulate PostHog data from stream chunks."""
+            nonlocal _ph_is_error, _ph_error
+            if chunk.text_delta:
+                _ph_content_parts.append(chunk.text_delta)
+            if chunk.completed_tool_calls:
+                for tc in chunk.completed_tool_calls:
+                    _ph_tool_calls.append({"name": tc.name, "arguments": tc.arguments})
+            if chunk.usage:
+                _ph_usage.update(chunk.usage)
+            if chunk.error_content:
+                _ph_is_error = True
+                _ph_error = chunk.error_content
+            if chunk.finish_reason == "error":
+                _ph_is_error = True
+
+        def _ph_emit() -> None:
+            """Emit PostHog generation event from accumulated stream data."""
+            try:
+                from creato.posthog import capture_generation
+                capture_generation(
+                    model=resolved_model,
+                    provider=provider_name,
+                    messages=messages,
+                    output_content="".join(_ph_content_parts) or None,
+                    output_tool_calls=_ph_tool_calls or None,
+                    input_tokens=_ph_usage.get("prompt_tokens", 0),
+                    output_tokens=_ph_usage.get("completion_tokens", 0),
+                    latency=time.monotonic() - _ph_start,
+                    is_error=_ph_is_error,
+                    error=_ph_error,
+                    tools=tools,
+                    stream=True,
+                    temperature=float(temperature) if isinstance(temperature, (int, float)) else None,
+                    max_tokens=int(max_tokens) if isinstance(max_tokens, (int, float)) else None,
+                )
+            except Exception:
+                pass
+
         for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
             first_chunk_received = False
             try:
                 async for chunk in self.chat_stream(**kw):
                     first_chunk_received = True
+                    _ph_accumulate(chunk)
                     yield chunk
                     if chunk.finish_reason:
                         # Log usage if present
@@ -455,8 +554,12 @@ class LLMProvider(ABC):
                             logger.info(
                                 "LLM stream done [{}] model={} attempt={} usage={}",
                                 provider_name, resolved_model, attempt, chunk.usage                            )
+                _ph_emit()
                 return  # stream completed successfully
             except asyncio.CancelledError:
+                _ph_is_error = True
+                _ph_error = "cancelled"
+                _ph_emit()
                 raise
             except Exception as exc:
                 if first_chunk_received:
@@ -465,6 +568,9 @@ class LLMProvider(ABC):
                         "LLM stream broke mid-way [{}] model={}: {}",
                         provider_name, resolved_model, exc,
                     )
+                    _ph_is_error = True
+                    _ph_error = f"Stream interrupted: {exc}"
+                    _ph_emit()
                     yield LLMStreamChunk(
                         finish_reason="error",
                         error_content=f"Stream interrupted: {exc}",
@@ -479,10 +585,15 @@ class LLMProvider(ABC):
                         logger.warning("Non-transient stream error with images, retrying without")
                         try:
                             async for chunk in self.chat_stream(**{**kw, "messages": stripped}):
+                                _ph_accumulate(chunk)
                                 yield chunk
+                            _ph_emit()
                             return
                         except Exception:
                             pass
+                    _ph_is_error = True
+                    _ph_error = f"Error calling LLM: {exc}"
+                    _ph_emit()
                     yield LLMStreamChunk(
                         finish_reason="error",
                         error_content=f"Error calling LLM: {exc}",
@@ -493,13 +604,24 @@ class LLMProvider(ABC):
                     "LLM stream transient error (attempt {}/{}), retrying in {}s: {}",
                     attempt, len(self._CHAT_RETRY_DELAYS), delay, err_str[:120],
                 )
+                # Reset accumulators for retry
+                _ph_content_parts.clear()
+                _ph_tool_calls.clear()
+                _ph_usage.clear()
+                _ph_is_error = False
+                _ph_error = None
                 await asyncio.sleep(delay)
 
         # Final attempt — no more retries
         try:
             async for chunk in self.chat_stream(**kw):
+                _ph_accumulate(chunk)
                 yield chunk
+            _ph_emit()
         except Exception as exc:
+            _ph_is_error = True
+            _ph_error = f"Error calling LLM after retries: {exc}"
+            _ph_emit()
             yield LLMStreamChunk(
                 finish_reason="error",
                 error_content=f"Error calling LLM after retries: {exc}",

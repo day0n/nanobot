@@ -205,6 +205,15 @@ class RedisConfig(Base):
     ssl: bool = False  # AWS ElastiCache requires SSL
 
 
+class PostHogConfig(Base):
+    """PostHog LLM Analytics configuration."""
+
+    api_key: str = ""  # PostHog project API key, empty = disabled
+    host: str = "https://us.i.posthog.com"
+    enabled: bool = True  # Master switch (still requires api_key)
+    privacy_mode: bool = False  # If true, redact input/output content from events
+
+
 class Config(BaseSettings):
     """Root configuration for creato."""
 
@@ -219,6 +228,7 @@ class Config(BaseSettings):
     rabbitmq: RabbitMQConfig = Field(default_factory=RabbitMQConfig)
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
     sentry: SentryConfig = Field(default_factory=SentryConfig)
+    posthog: PostHogConfig = Field(default_factory=PostHogConfig)
 
     @property
     def workspace_path(self) -> Path:
