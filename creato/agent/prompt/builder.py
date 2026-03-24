@@ -1,10 +1,9 @@
 """PromptBuilder — assembles system prompt and messages for the agent.
 
 Prompt assembly order:
-1. Identity layer     — build_identity() from identity.py
-2. Guidelines layer   — TOOL_GUIDELINES from guidelines.py
-3. Skills layer       — always-on skills + skills summary from SkillsLoader
-4. (future) Memory layer — long-term memory injection point
+1. Identity + guidelines layer — build_identity() from identity.py
+2. Skills layer                — always-on skills + skills summary from SkillsLoader
+3. (future) Memory layer       — long-term memory injection point
 
 The runtime context (time, channel, flow_id) is NOT in the system prompt.
 It is prepended to the user message via build_runtime_context().
@@ -16,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from creato.agent.prompt.identity import build_identity
-from creato.agent.prompt.guidelines import TOOL_GUIDELINES
 from creato.agent.prompt.runtime import build_runtime_context
 from creato.agent.skills import SkillsLoader
 from creato.utils.helpers import build_assistant_message, detect_image_mime
@@ -29,17 +27,20 @@ class PromptBuilder:
         self.workspace = workspace
         self.skills = skills_loader or SkillsLoader()
         self._tool_names: list[str] | None = None
+        self._cached_system_prompt: str | None = None
 
     def set_tool_names(self, names: list[str]) -> None:
         """Set the currently registered tool names (called by AgentLoop after tool registration)."""
         self._tool_names = names
+        self._cached_system_prompt = None  # invalidate cache
 
     def build_system_prompt(self) -> str:
         """Build the full system prompt. This output is cacheable (no time-varying data)."""
+        if self._cached_system_prompt is not None:
+            return self._cached_system_prompt
+
         workspace_path = str(self.workspace.expanduser().resolve())
         parts = [build_identity(workspace_path, tool_names=self._tool_names)]
-
-        parts.append(TOOL_GUIDELINES)
 
         # Always-on skills (injected into every request)
         always_skills = self.skills.get_always_skills()
@@ -60,7 +61,8 @@ class PromptBuilder:
                 + skills_summary
             )
 
-        return "\n\n---\n\n".join(parts)
+        self._cached_system_prompt = "\n\n---\n\n".join(parts)
+        return self._cached_system_prompt
 
     def build_messages(
         self,
