@@ -240,6 +240,11 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             "user_id": auth_user.user_id,
         }
 
+        # Merge frontend metadata with flow_id
+        request_metadata = dict(body.metadata or {})
+        if flow_id:
+            request_metadata["flow_id"] = flow_id
+
         async def event_stream():
             queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
 
@@ -255,7 +260,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                         channel="api",
                         chat_id=auth_user.user_id,
                         on_progress=on_progress,
-                        metadata={"flow_id": flow_id} if flow_id else None,
+                        metadata=request_metadata or None,
                         private_context=private_context,
                         user_id=auth_user.user_id,
                         workflow_id=flow_id,
@@ -294,7 +299,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                     channel="api",
                     chat_id=auth_user.user_id,
                     on_progress=collect_events,
-                    metadata={"flow_id": flow_id} if flow_id else None,
+                    metadata=request_metadata or None,
                     private_context=private_context,
                     user_id=auth_user.user_id,
                     workflow_id=flow_id,

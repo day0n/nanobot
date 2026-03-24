@@ -367,6 +367,11 @@ class AgentLoop:
                                     result_str = f"Workflow failed: {error_msg}"
                                     _stream_got_terminal = True
                                     break
+                                if et == "node_time_out":
+                                    node_id = raw_event.get("node_id", "unknown")
+                                    result_str = f"Workflow failed: node {node_id} timed out"
+                                    _stream_got_terminal = True
+                                    break
                                 if et in ("finish_flow", "flow_killed"):
                                     _stream_got_terminal = True
                                     break

@@ -124,9 +124,9 @@ class RunWorkflowTool(Tool):
                     et = event.get("event_type")
                     # Mark terminal BEFORE yield — GeneratorExit arrives at the yield point,
                     # so the flag must already be set by then.
-                    if et in ("finish_flow", "flow_killed"):
+                    if et in ("finish_flow", "flow_killed", "node_time_out"):
                         _terminal_seen = True
-                    if et == "node_status" and event.get("status") == "select":
+                    if et == "node_status" and event.get("status") in ("select", "failed"):
                         _terminal_seen = True
                     yield event
                     if _terminal_seen:

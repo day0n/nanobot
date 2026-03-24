@@ -185,8 +185,10 @@ def workflow_killed(data: dict[str, Any]) -> AgentEvent:
 
 
 # Consumer event_type → Agent SSE constructor
+# NOTE: start_flow is NOT mapped here — loop.py emits workflow.started
+# when it receives the WorkflowExecution object, before consuming the stream.
+# Mapping it here would cause a duplicate workflow.started event.
 WORKFLOW_EVENT_MAP: dict[str, Any] = {
-    "start_flow": workflow_started,
     "node_status": workflow_node_status,
     "llm_model_ready": workflow_model_ready,
     "llm_model_status": workflow_model_status,
