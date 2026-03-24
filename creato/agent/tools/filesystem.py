@@ -412,10 +412,6 @@ class LoadSkillTool(Tool):
             content = self._skills_loader.load_skill(name)
             if content is None:
                 return f"Error: Skill not found: {name}"
-            # Replace {skill_dir} placeholder with actual path so LLM can read reference files
-            skill_dir = self._skills_loader.builtin_skills / name
-            if skill_dir.exists():
-                content = content.replace("{skill_dir}", str(skill_dir))
             return content
         except Exception as e:
             return f"Error loading skill: {str(e)}"
