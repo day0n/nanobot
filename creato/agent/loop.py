@@ -32,7 +32,6 @@ from creato.agent.events import (
 from creato.agent.request_context import reset_request_context, set_request_context
 from creato.agent.subagent import SubagentManager
 from creato.agent.tools.base import ToolResult, WorkflowExecution
-from creato.agent.tools.cron import CronTool
 from creato.agent.skills import BUILTIN_SKILLS_DIR
 from creato.agent.tools.filesystem import EditFileTool, ListDirTool, LoadSkillTool, ReadFileTool, WriteFileTool
 from creato.agent.tools.message import MessageTool
@@ -48,7 +47,6 @@ from creato.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
     from creato.config.schema import ApiServerConfig, ChannelsConfig, ExecToolConfig, WebSearchConfig
-    from creato.cron.service import CronService
 
 
 class AgentLoop:
@@ -77,7 +75,6 @@ class AgentLoop:
         web_proxy: str | None = None,
         api_config: ApiServerConfig | None = None,
         exec_config: ExecToolConfig | None = None,
-        cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
@@ -100,7 +97,6 @@ class AgentLoop:
         self.web_proxy = web_proxy
         self.api_config = api_config or ApiServerConfig()
         self.exec_config = exec_config or ExecToolConfig()
-        self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
 
         self.context = PromptBuilder(workspace)
@@ -160,9 +156,6 @@ class AgentLoop:
         # Disabled for chatbot-only rollout: replies return through the normal outbound path.
         # self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
-        # Disabled for chatbot-only rollout: scheduled actions are out of scope.
-        # if self.cron_service:
-        #     self.tools.register(CronTool(self.cron_service))
         self.tools.register(GetWorkflowTool(api_base=self.api_config.internal_api_base))
         self.tools.register(GetWorkflowResultsTool(api_base=self.api_config.internal_api_base))
         self.tools.register(EditWorkflowTool(
@@ -179,7 +172,7 @@ class AgentLoop:
 
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Update context for all tools that need routing info."""
-        for name in ("message", "spawn", "cron"):
+        for name in ("message", "spawn"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
                     tool.set_context(channel, chat_id, *([message_id] if name == "message" else [])) # type: ignore

@@ -22,9 +22,6 @@ def _strip_ansi(text):
 runner = CliRunner()
 
 
-class _StopGateway(RuntimeError):
-    pass
-
 
 @pytest.fixture
 def mock_paths():
@@ -130,8 +127,6 @@ def test_onboard_help_shows_workspace_and_config_options():
 def test_onboard_uses_explicit_config_and_workspace_paths(tmp_path, monkeypatch):
     config_path = tmp_path / "instance" / "config.json"
     workspace_path = tmp_path / "workspace"
-
-    monkeypatch.setattr("creato.channels.registry.discover_all", lambda: {})
 
     result = runner.invoke(
         app,
@@ -272,14 +267,11 @@ def mock_agent_runtime(tmp_path):
     """Mock agent command dependencies for focused CLI tests."""
     config = Config()
     config.agents.defaults.workspace = str(tmp_path / "default-workspace")
-    cron_dir = tmp_path / "data" / "cron"
 
     with patch("creato.config.loader.load_config", return_value=config) as mock_load_config, \
-         patch("creato.config.paths.get_cron_dir", return_value=cron_dir), \
          patch("creato.cli.commands._make_provider", return_value=object()), \
          patch("creato.cli.commands._print_agent_response") as mock_print_response, \
          patch("creato.bus.queue.MessageBus"), \
-         patch("creato.cron.service.CronService"), \
          patch("creato.agent.loop.AgentLoop") as mock_agent_loop_cls:
 
         agent_loop = MagicMock()
@@ -343,10 +335,8 @@ def test_agent_config_sets_active_path(monkeypatch, tmp_path: Path) -> None:
         lambda path: seen.__setitem__("config_path", path),
     )
     monkeypatch.setattr("creato.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("creato.config.paths.get_cron_dir", lambda: config_file.parent / "cron")
     monkeypatch.setattr("creato.cli.commands._make_provider", lambda _config: object())
     monkeypatch.setattr("creato.bus.queue.MessageBus", lambda: object())
-    monkeypatch.setattr("creato.cron.service.CronService", lambda _store: object())
 
     class _FakeAgentLoop:
         def __init__(self, *args, **kwargs) -> None:
@@ -393,122 +383,3 @@ def test_agent_workspace_override_wins_over_config_workspace(mock_agent_runtime,
     assert mock_agent_runtime["agent_loop_cls"].call_args.kwargs["workspace"] == workspace_path
 
 
-def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Path) -> None:
-    config_file = tmp_path / "instance" / "config.json"
-    config_file.parent.mkdir(parents=True)
-    config_file.write_text("{}")
-
-    config = Config()
-    config.agents.defaults.workspace = str(tmp_path / "config-workspace")
-    seen: dict[str, Path] = {}
-
-    monkeypatch.setattr(
-        "creato.config.loader.set_config_path",
-        lambda path: seen.__setitem__("config_path", path),
-    )
-    monkeypatch.setattr("creato.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr(
-        "creato.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
-    )
-
-    result = runner.invoke(app, ["gateway", "--config", str(config_file)])
-
-    assert isinstance(result.exception, _StopGateway)
-    assert seen["config_path"] == config_file.resolve()
-
-
-def test_gateway_workspace_option_overrides_config(monkeypatch, tmp_path: Path) -> None:
-    config_file = tmp_path / "instance" / "config.json"
-    config_file.parent.mkdir(parents=True)
-    config_file.write_text("{}")
-
-    config = Config()
-    config.agents.defaults.workspace = str(tmp_path / "config-workspace")
-    override = tmp_path / "override-workspace"
-    seen: dict[str, Path] = {}
-
-    monkeypatch.setattr("creato.config.loader.set_config_path", lambda _path: None)
-    monkeypatch.setattr("creato.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr(
-        "creato.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
-    )
-
-    result = runner.invoke(
-        app,
-        ["gateway", "--config", str(config_file), "--workspace", str(override)],
-    )
-
-    assert isinstance(result.exception, _StopGateway)
-    assert config.workspace_path == override
-
-def test_gateway_uses_config_directory_for_cron_store(monkeypatch, tmp_path: Path) -> None:
-    config_file = tmp_path / "instance" / "config.json"
-    config_file.parent.mkdir(parents=True)
-    config_file.write_text("{}")
-
-    config = Config()
-    config.agents.defaults.workspace = str(tmp_path / "config-workspace")
-    seen: dict[str, Path] = {}
-
-    monkeypatch.setattr("creato.config.loader.set_config_path", lambda _path: None)
-    monkeypatch.setattr("creato.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("creato.config.paths.get_cron_dir", lambda: config_file.parent / "cron")
-    monkeypatch.setattr("creato.cli.commands._make_provider", lambda _config: object())
-    monkeypatch.setattr("creato.bus.queue.MessageBus", lambda: object())
-    monkeypatch.setattr("creato.session.manager.SessionManager", lambda _workspace: object())
-
-    class _StopCron:
-        def __init__(self, store_path: Path) -> None:
-            seen["cron_store"] = store_path
-            raise _StopGateway("stop")
-
-    monkeypatch.setattr("creato.cron.service.CronService", _StopCron)
-
-    result = runner.invoke(app, ["gateway", "--config", str(config_file)])
-
-    assert isinstance(result.exception, _StopGateway)
-    assert seen["cron_store"] == config_file.parent / "cron" / "jobs.json"
-
-
-def test_gateway_uses_configured_port_when_cli_flag_is_missing(monkeypatch, tmp_path: Path) -> None:
-    config_file = tmp_path / "instance" / "config.json"
-    config_file.parent.mkdir(parents=True)
-    config_file.write_text("{}")
-
-    config = Config()
-    config.gateway.port = 18791
-
-    monkeypatch.setattr("creato.config.loader.set_config_path", lambda _path: None)
-    monkeypatch.setattr("creato.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr(
-        "creato.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
-    )
-
-    result = runner.invoke(app, ["gateway", "--config", str(config_file)])
-
-    assert isinstance(result.exception, _StopGateway)
-    assert "port 18791" in result.stdout
-
-
-def test_gateway_cli_port_overrides_configured_port(monkeypatch, tmp_path: Path) -> None:
-    config_file = tmp_path / "instance" / "config.json"
-    config_file.parent.mkdir(parents=True)
-    config_file.write_text("{}")
-
-    config = Config()
-    config.gateway.port = 18791
-
-    monkeypatch.setattr("creato.config.loader.set_config_path", lambda _path: None)
-    monkeypatch.setattr("creato.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr(
-        "creato.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
-    )
-
-    result = runner.invoke(app, ["gateway", "--config", str(config_file), "--port", "18792"])
-
-    assert isinstance(result.exception, _StopGateway)
-    assert "port 18792" in result.stdout

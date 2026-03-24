@@ -84,7 +84,7 @@ This is your runtime directory for file operations and session storage.
 ## {AGENT_NAME} Guidelines
 - State intent before tool calls, but NEVER predict or claim results before receiving them.
 {tools_line}
-- Do not assume file-writing, shell, directory-listing, cron, message-sending, or MCP tools are available.
+- Do not assume file-writing, shell, directory-listing, message-sending, or MCP tools are available.
 - Before reading a file, confirm it is necessary. Do not assume files or directories exist.
 - If a tool call fails, analyze the error before retrying with a different approach.
 - Ask for clarification when the request is ambiguous.

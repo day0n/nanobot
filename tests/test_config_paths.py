@@ -1,9 +1,7 @@
 from pathlib import Path
 
 from creato.config.paths import (
-    get_bridge_install_dir,
     get_cli_history_path,
-    get_cron_dir,
     get_data_dir,
     get_legacy_sessions_dir,
     get_logs_dir,
@@ -18,8 +16,7 @@ def test_runtime_dirs_follow_config_path(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("creato.config.paths.get_config_path", lambda: config_file)
 
     assert get_data_dir() == config_file.parent
-    assert get_runtime_subdir("cron") == config_file.parent / "cron"
-    assert get_cron_dir() == config_file.parent / "cron"
+    assert get_runtime_subdir("logs") == config_file.parent / "logs"
     assert get_logs_dir() == config_file.parent / "logs"
 
 
@@ -33,7 +30,6 @@ def test_media_dir_supports_channel_namespace(monkeypatch, tmp_path: Path) -> No
 
 def test_shared_and_legacy_paths_remain_global() -> None:
     assert get_cli_history_path() == Path.home() / ".creato" / "history" / "cli_history"
-    assert get_bridge_install_dir() == Path.home() / ".creato" / "bridge"
     assert get_legacy_sessions_dir() == Path.home() / ".creato" / "sessions"
 
 
