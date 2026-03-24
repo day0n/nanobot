@@ -19,6 +19,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
+from nanobot.security.network import validate_url_target
 from nanobot.utils.helpers import split_message
 
 TELEGRAM_MAX_MESSAGE_LEN = 4000  # Telegram message character limit
@@ -357,6 +358,9 @@ class TelegramChannel(BaseChannel):
 
                 # Telegram Bot API accepts HTTP(S) URLs directly for media params.
                 if media_path.startswith(("http://", "https://")):
+                    ok, error = validate_url_target(media_path)
+                    if not ok:
+                        raise ValueError(f"unsafe media URL: {error}")
                     await sender(
                         chat_id=chat_id,
                         **{param: media_path},
