@@ -339,18 +339,18 @@ def _make_provider(config: Config):
     from creato.providers.openai_codex_provider import OpenAICodexProvider
     from creato.providers.azure_openai_provider import AzureOpenAIProvider
 
-    # Vertex AI Gemini: checked first — uses service account credentials, not api_key
+    # Vertex AI Gemini: only when credentials are configured AND model is a Gemini model
     vc = config.providers.vertex_gemini
-    if vc.oc_json and vc.project:
+    model = config.agents.defaults.model
+    if vc.oc_json and vc.project and "gemini" in model.lower():
         from creato.providers.vertex_gemini_provider import VertexGeminiProvider
         return VertexGeminiProvider(
             oc_json_b64=vc.oc_json,
             project=vc.project,
             location=vc.location,
-            default_model=config.agents.defaults.model,
+            default_model=model,
         )
 
-    model = config.agents.defaults.model
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
