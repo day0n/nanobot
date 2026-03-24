@@ -11,18 +11,21 @@ def test_importing_providers_package_is_lazy(monkeypatch) -> None:
     monkeypatch.delitem(sys.modules, "creato.providers.litellm_provider", raising=False)
     monkeypatch.delitem(sys.modules, "creato.providers.openai_codex_provider", raising=False)
     monkeypatch.delitem(sys.modules, "creato.providers.azure_openai_provider", raising=False)
+    monkeypatch.delitem(sys.modules, "creato.providers.openai_provider", raising=False)
 
     providers = importlib.import_module("creato.providers")
 
     assert "creato.providers.litellm_provider" not in sys.modules
     assert "creato.providers.openai_codex_provider" not in sys.modules
     assert "creato.providers.azure_openai_provider" not in sys.modules
+    assert "creato.providers.openai_provider" not in sys.modules
     assert providers.__all__ == [
         "LLMProvider",
         "LLMResponse",
         "LiteLLMProvider",
         "OpenAICodexProvider",
         "AzureOpenAIProvider",
+        "OpenAIProvider",
     ]
 
 

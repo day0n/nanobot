@@ -7,18 +7,20 @@ from typing import TYPE_CHECKING
 
 from creato.providers.base import LLMProvider, LLMResponse
 
-__all__ = ["LLMProvider", "LLMResponse", "LiteLLMProvider", "OpenAICodexProvider", "AzureOpenAIProvider"]
+__all__ = ["LLMProvider", "LLMResponse", "LiteLLMProvider", "OpenAICodexProvider", "AzureOpenAIProvider", "OpenAIProvider"]
 
 _LAZY_IMPORTS = {
     "LiteLLMProvider": ".litellm_provider",
     "OpenAICodexProvider": ".openai_codex_provider",
     "AzureOpenAIProvider": ".azure_openai_provider",
+    "OpenAIProvider": ".openai_provider",
 }
 
 if TYPE_CHECKING:
     from creato.providers.azure_openai_provider import AzureOpenAIProvider
     from creato.providers.litellm_provider import LiteLLMProvider
     from creato.providers.openai_codex_provider import OpenAICodexProvider
+    from creato.providers.openai_provider import OpenAIProvider
 
 
 def __getattr__(name: str):

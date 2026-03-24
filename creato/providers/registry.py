@@ -239,10 +239,10 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         model_overrides=(),
         supports_prompt_caching=True,
     ),
-    # OpenAI: LiteLLM recognizes "gpt-*" natively, no prefix needed.
+    # OpenAI: direct provider using openai SDK. Covers gpt-*, o1-*, o3-*, o4-* models.
     ProviderSpec(
         name="openai",
-        keywords=("openai", "gpt"),
+        keywords=("openai", "gpt", "o1", "o3", "o4"),
         env_key="OPENAI_API_KEY",
         display_name="OpenAI",
         litellm_prefix="",
@@ -255,6 +255,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="",
         strip_model_prefix=False,
         model_overrides=(),
+        is_direct=True,
     ),
     # OpenAI Codex: uses OAuth, not API key.
     ProviderSpec(

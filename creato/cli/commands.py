@@ -357,6 +357,19 @@ def _make_provider(config: Config):
     # OpenAI Codex (OAuth)
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
         provider = OpenAICodexProvider(default_model=model)
+    # OpenAI: direct provider using openai SDK with streaming support
+    elif provider_name == "openai":
+        from creato.providers.openai_provider import OpenAIProvider
+        if not p or not p.api_key:
+            console.print("[red]Error: OpenAI requires api_key.[/red]")
+            console.print("Set it in ~/.creato/config.json under providers.openai section")
+            raise typer.Exit(1)
+        provider = OpenAIProvider(
+            api_key=p.api_key,
+            api_base=p.api_base,
+            default_model=model,
+            extra_headers=p.extra_headers if p else None,
+        )
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     elif provider_name == "custom":
         from creato.providers.custom_provider import CustomProvider
