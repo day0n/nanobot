@@ -67,16 +67,22 @@ class Mem0Memory(MemoryProvider):
         if not user_id:
             return []
         try:
-            results = self._memory.search(query=query, user_id=user_id, limit=limit)
+            raw = self._memory.search(query=query, user_id=user_id, limit=limit)
+            # mem0 returns {"results": [...]} or a list directly depending on version
+            if isinstance(raw, dict):
+                results = raw.get("results", [])
+            else:
+                results = raw
             entries = []
             for r in results:
                 memory_text = r.get("memory", "") if isinstance(r, dict) else str(r)
                 score = r.get("score", 0.0) if isinstance(r, dict) else 0.0
-                entries.append(MemoryEntry(
-                    content=memory_text,
-                    source="long_term",
-                    relevance_score=float(score),
-                ))
+                if memory_text:
+                    entries.append(MemoryEntry(
+                        content=memory_text,
+                        source="long_term",
+                        relevance_score=float(score),
+                    ))
             return entries
         except Exception as e:
             logger.warning("Mem0 retrieve failed for user {}: {}", user_id, e)
