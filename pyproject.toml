@@ -47,6 +47,7 @@ dependencies = [
     "nanoid==2.0.0",
     "sentry-sdk[fastapi]>=2.29.0,<3.0.0",
     "posthog>=3.20.0,<4.0.0",
+    "mem0ai>=0.1.0",
 ]
 
 [project.optional-dependencies]

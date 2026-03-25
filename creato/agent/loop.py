@@ -38,6 +38,7 @@ from creato.agent.events import (
     workflow_started,
 )
 from creato.agent.request_context import reset_request_context, set_request_context
+from creato.agent.memory import MemoryProvider
 from creato.agent.subagent import SubagentManager
 from creato.agent.tools.base import ToolResult, WorkflowExecution
 from creato.agent.skills import BUILTIN_SKILLS_DIR
@@ -46,7 +47,7 @@ from creato.agent.tools.message import MessageTool
 from creato.agent.tools.registry import ToolRegistry
 from creato.agent.tools.shell import ExecTool
 from creato.agent.tools.spawn import SpawnTool
-from creato.agent.tools.opencreator import EditWorkflowTool, GetWorkflowTool, GetWorkflowResultsTool, RunWorkflowTool
+from creato.agent.tools.opencreator import EditWorkflowTool, GetNodeSpecTool, GetWorkflowTool, GetWorkflowResultsTool, RunWorkflowTool
 from creato.agent.tools.web import WebFetchTool, WebSearchTool
 from creato.bus.events import InboundMessage, OutboundMessage
 from creato.bus.queue import MessageBus
@@ -89,6 +90,7 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         summary_model: str | None = None,
         summary_api_key: str | None = None,
+        memory: MemoryProvider | None = None,
     ):
         from creato.config.schema import ApiServerConfig, ExecToolConfig, WebSearchConfig
 
@@ -106,6 +108,7 @@ class AgentLoop:
         self.api_config = api_config or ApiServerConfig()
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
+        self.memory = memory
 
         self.context = PromptBuilder(workspace)
         if session_manager is None:
@@ -166,6 +169,7 @@ class AgentLoop:
         self.tools.register(SpawnTool(manager=self.subagents))
         self.tools.register(GetWorkflowTool(api_base=self.api_config.internal_api_base))
         self.tools.register(GetWorkflowResultsTool(api_base=self.api_config.internal_api_base))
+        self.tools.register(GetNodeSpecTool())
         self.tools.register(EditWorkflowTool(
             api_base=self.api_config.internal_api_base,
             internal_api_key=self.api_config.internal_api_key,
@@ -618,6 +622,8 @@ class AgentLoop:
                 )
                 self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
                 history = session.get_history(max_messages=0)
+                # Retrieve long-term memory for context
+                memory_context = await self._retrieve_memory(user_id, msg.content)
                 # Subagent results should be assistant role, other system messages use user role
                 current_role = "assistant" if msg.sender_id == "subagent" else "user"
                 messages = self.context.build_messages(
@@ -625,6 +631,7 @@ class AgentLoop:
                     current_message=msg.content, channel=channel, chat_id=chat_id,
                     metadata=msg.metadata,
                     current_role=current_role,
+                    memory_context=memory_context,
                 )
                 final_content, _, all_msgs, tool_timings = await self._run_agent_loop(messages)
                 _posthog_final_content = final_content
@@ -632,6 +639,7 @@ class AgentLoop:
                 await self.sessions.save(session, tool_traces=self._pending_traces)
                 self._pending_traces = []
                 self._maybe_generate_summary(session)
+                self._store_memory_async(user_id, all_msgs, 1 + len(history))
                 return OutboundMessage(channel=channel, chat_id=chat_id,
                                       content=final_content or "Background task completed.")
 
@@ -677,12 +685,15 @@ class AgentLoop:
                     message_tool.start_turn()
 
             history = session.get_history(max_messages=0)
+            # Retrieve long-term memory for context
+            memory_context = await self._retrieve_memory(user_id, msg.content)
             initial_messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content,
                 media=msg.media if msg.media else None,
                 channel=msg.channel, chat_id=msg.chat_id,
                 metadata=msg.metadata,
+                memory_context=memory_context,
             )
 
             async def _bus_progress(event: AgentEvent) -> None:
@@ -708,6 +719,7 @@ class AgentLoop:
             await self.sessions.save(session, tool_traces=self._pending_traces)
             self._pending_traces = []
             self._maybe_generate_summary(session)
+            self._store_memory_async(user_id, all_msgs, 1 + len(history))
 
             if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
                 return None
@@ -845,6 +857,34 @@ class AgentLoop:
         session.message_count += display_count
         session.turn_count = turn
         session.updated_at = datetime.now()
+
+    # --- Long-term memory helpers ---
+
+    async def _retrieve_memory(self, user_id: str, query: str) -> str | None:
+        """Retrieve relevant long-term memories for the user. Returns formatted text or None."""
+        if not self.memory or not user_id:
+            return None
+        try:
+            entries = await self.memory.retrieve(user_id, query)
+            if not entries:
+                return None
+            return "\n".join(f"- {e.content}" for e in entries)
+        except Exception as e:
+            logger.warning("Memory retrieve failed for user {}: {}", user_id, e)
+            return None
+
+    def _store_memory_async(self, user_id: str, all_msgs: list[dict], skip: int) -> None:
+        """Schedule async memory extraction from the current turn (non-blocking)."""
+        if not self.memory or not user_id:
+            return
+        turn_messages = [
+            m for m in all_msgs[skip:]
+            if m.get("role") in ("user", "agent")
+            and isinstance(m.get("content"), str)
+            and m.get("content", "").strip()
+        ]
+        if turn_messages:
+            self._schedule_background(self.memory.store(user_id, turn_messages))
 
     _SUMMARY_PROMPT = (
         "Summarize this conversation in one short sentence (no more than 15 words). "

@@ -203,6 +203,22 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     cfg = config
     # Resolve summary model API key from providers config
     _summary_key = (cfg.get_provider(cfg.agents.defaults.summary_model) or cfg.providers.openai).api_key or None
+
+    # Initialize long-term memory if enabled
+    _memory = None
+    if cfg.memory.enabled:
+        from creato.agent.memory.mem0_memory import Mem0Memory
+        _openai_key = cfg.providers.openai.api_key or None
+        _memory = Mem0Memory(
+            mongo_uri=cfg.mongodb.uri,
+            db_name=cfg.mongodb.agent_db,
+            collection_name=cfg.memory.collection_name,
+            embedding_model_dims=cfg.memory.embedding_model_dims,
+            llm_model=cfg.memory.llm_model,
+            embedder_model=cfg.memory.embedder_model,
+            openai_api_key=_openai_key,
+        )
+
     agent = AgentLoop(
         bus=MessageBus(),
         provider=provider,
@@ -220,6 +236,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         channels_config=cfg.channels,
         summary_model=cfg.agents.defaults.summary_model,
         summary_api_key=_summary_key,
+        memory=_memory,
     )
     app.state.agent = agent
 

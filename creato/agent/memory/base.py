@@ -1,8 +1,8 @@
 """Memory provider interface — defines the contract for memory backends.
 
-Not yet integrated into the agent loop. This module establishes the interface
-so that future memory implementations (vector store, knowledge graph, etc.)
-can be plugged in without changing the prompt builder or loop.
+Two dimensions:
+- Long-term memory: keyed by user_id, persists across sessions (preferences, background, etc.)
+- Session memory: keyed by session_id, scoped to a single conversation (future: summarization)
 """
 
 from abc import ABC, abstractmethod
@@ -21,39 +21,26 @@ class MemoryEntry:
 
 
 class MemoryProvider(ABC):
-    """Abstract interface for memory backends.
+    """Abstract interface for long-term memory backends.
 
-    Future implementations:
-    - ConversationSummaryMemory: summarize old turns to save context window
-    - VectorMemory: embed and retrieve relevant past interactions
-    - WorkflowMemory: remember user's workflow patterns and preferences
+    Long-term memory is keyed by user_id — it persists across sessions
+    and captures user preferences, background, and behavioral patterns.
     """
 
     @abstractmethod
-    async def store(self, session_id: str, entry: MemoryEntry) -> None:
-        """Store a memory entry."""
+    async def retrieve(self, user_id: str, query: str, limit: int = 5) -> list[MemoryEntry]:
+        """Retrieve relevant long-term memories for a user given a query."""
 
     @abstractmethod
-    async def retrieve(
-        self, session_id: str, query: str, limit: int = 5,
-    ) -> list[MemoryEntry]:
-        """Retrieve relevant memories for a query."""
-
-    @abstractmethod
-    async def clear(self, session_id: str) -> None:
-        """Clear all memories for a session."""
+    async def store(self, user_id: str, messages: list[dict[str, Any]]) -> None:
+        """Extract and store memories from a conversation turn."""
 
 
 class NoOpMemory(MemoryProvider):
     """Default no-op memory provider. Does nothing, returns nothing."""
 
-    async def store(self, session_id: str, entry: MemoryEntry) -> None:
-        pass
-
-    async def retrieve(
-        self, session_id: str, query: str, limit: int = 5,
-    ) -> list[MemoryEntry]:
+    async def retrieve(self, user_id: str, query: str, limit: int = 5) -> list[MemoryEntry]:
         return []
 
-    async def clear(self, session_id: str) -> None:
+    async def store(self, user_id: str, messages: list[dict[str, Any]]) -> None:
         pass

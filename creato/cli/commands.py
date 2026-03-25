@@ -520,6 +520,22 @@ def agent(
         logger.disable("creato")
 
     _sk = (config.get_provider(config.agents.defaults.summary_model) or config.providers.openai).api_key or None
+
+    # Initialize long-term memory if enabled
+    _memory = None
+    if config.memory.enabled:
+        from creato.agent.memory.mem0_memory import Mem0Memory
+        _openai_key = config.providers.openai.api_key or None
+        _memory = Mem0Memory(
+            mongo_uri=config.mongodb.uri,
+            db_name=config.mongodb.agent_db,
+            collection_name=config.memory.collection_name,
+            embedding_model_dims=config.memory.embedding_model_dims,
+            llm_model=config.memory.llm_model,
+            embedder_model=config.memory.embedder_model,
+            openai_api_key=_openai_key,
+        )
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -537,6 +553,7 @@ def agent(
         channels_config=config.channels,
         summary_model=config.agents.defaults.summary_model,
         summary_api_key=_sk,
+        memory=_memory,
     )
 
     async def _init_db_and_session_manager():

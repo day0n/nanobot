@@ -3,7 +3,7 @@
 Prompt assembly order:
 1. Identity + guidelines layer — build_identity() from identity.py
 2. Skills layer                — always-on skills + skills summary from SkillsLoader
-3. (future) Memory layer       — long-term memory injection point
+3. Memory layer                — long-term memory injection (per-request, not cached)
 
 The runtime context (time, channel, flow_id) is NOT in the system prompt.
 It is prepended to the user message via build_runtime_context().
@@ -74,6 +74,7 @@ class PromptBuilder:
         chat_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         current_role: str = "user",
+        memory_context: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         runtime_ctx = build_runtime_context(channel, chat_id, metadata)
@@ -86,8 +87,18 @@ class PromptBuilder:
         else:
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
 
+        # Build system prompt with optional long-term memory injection
+        system = self.build_system_prompt()
+        if memory_context:
+            system += (
+                "\n\n---\n\n# What You Know About This User\n\n"
+                "The following are facts you remember about this user from previous conversations. "
+                "Use them to provide personalized, context-aware responses.\n\n"
+                + memory_context
+            )
+
         return [
-            {"role": "system", "content": self.build_system_prompt()},
+            {"role": "system", "content": system},
             *history,
             {"role": current_role, "content": merged},
         ]

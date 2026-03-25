@@ -187,6 +187,17 @@ class WorkflowConfig(Base):
     run_flow_queue: str = "run_flow"  # Redis Stream queue name (same as Publisher/Consumer)
 
 
+class MemoryConfig(Base):
+    """Long-term memory configuration (mem0-based)."""
+
+    enabled: bool = False  # Master switch — set CREATO_MEMORY__ENABLED=true to activate
+    collection_name: str = "memories"  # Collection in agent_db for storing memories
+    embedding_model_dims: int = 1536  # Embedding dimensions (1536 for text-embedding-ada-002)
+    llm_model: str = "gpt-4o-mini"  # Cheap model for memory extraction
+    embedder_model: str = "text-embedding-ada-002"  # Embedding model
+    search_limit: int = 5  # Max memories to retrieve per query
+
+
 class MongoDBConfig(Base):
     """MongoDB connection configuration."""
 
@@ -224,6 +235,7 @@ class Config(BaseSettings):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     api: ApiServerConfig = Field(default_factory=ApiServerConfig)
     mongodb: MongoDBConfig = Field(default_factory=MongoDBConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
     rabbitmq: RabbitMQConfig = Field(default_factory=RabbitMQConfig)
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
