@@ -75,6 +75,7 @@ class PromptBuilder:
         metadata: dict[str, Any] | None = None,
         current_role: str = "user",
         memory_context: str | None = None,
+        context_summary: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         runtime_ctx = build_runtime_context(channel, chat_id, metadata)
@@ -89,6 +90,11 @@ class PromptBuilder:
 
         # Build system prompt with optional long-term memory injection
         system = self.build_system_prompt()
+        if context_summary:
+            system += (
+                "\n\n---\n\n# Earlier Conversation Summary\n\n"
+                + context_summary
+            )
         if memory_context:
             system += (
                 "\n\n---\n\n# What You Know About This User\n\n"

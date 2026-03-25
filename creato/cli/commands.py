@@ -554,6 +554,7 @@ def agent(
         summary_model=config.agents.defaults.summary_model,
         summary_api_key=_sk,
         memory=_memory,
+        max_output_tokens=config.agents.defaults.max_tokens,
     )
 
     async def _init_db_and_session_manager():

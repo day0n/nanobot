@@ -23,6 +23,8 @@ from creato.posthog import (
     set_posthog_context,
 )
 
+from creato.agent.context.compressor import ContextCompressor
+from creato.agent.context.token_counter import count_message, count_text
 from creato.agent.prompt import PromptBuilder
 from creato.agent.prompt.runtime import RUNTIME_CONTEXT_TAG
 from creato.agent.events import (
@@ -91,6 +93,7 @@ class AgentLoop:
         summary_model: str | None = None,
         summary_api_key: str | None = None,
         memory: MemoryProvider | None = None,
+        max_output_tokens: int = 8192,
     ):
         from creato.config.schema import ApiServerConfig, ExecToolConfig, WebSearchConfig
 
@@ -103,12 +106,17 @@ class AgentLoop:
         self._summary_api_key = summary_api_key
         self.max_iterations = max_iterations
         self.context_window_tokens = context_window_tokens
+        self.max_output_tokens = max_output_tokens
         self.web_search_config = web_search_config or WebSearchConfig()
         self.web_proxy = web_proxy
         self.api_config = api_config or ApiServerConfig()
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self.memory = memory
+        self._compressor = ContextCompressor(
+            model=summary_model or "openai/gpt-4o-mini",
+            api_key=summary_api_key,
+        )
 
         self.context = PromptBuilder(workspace)
         if session_manager is None:
@@ -621,9 +629,16 @@ class AgentLoop:
                     key, user_id=user_id, workflow_id=workflow_id, channel=channel,
                 )
                 self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-                history = session.get_history(max_messages=0)
-                # Retrieve long-term memory for context
+                full_history = session.get_history(max_messages=0)
+                # Retrieve long-term memory before budget calculation so its size is included
                 memory_context = await self._retrieve_memory(user_id, msg.content)
+                # Token-aware sliding window (includes all non-history token costs)
+                fixed_tokens = self._estimate_fixed_tokens(msg.content, memory_context)
+                history, dropped = self._trim_history(full_history, fixed_tokens, 0)
+                # Compress dropped messages into a summary (injected into system prompt)
+                context_summary: str | None = None
+                if dropped:
+                    context_summary = await self._compress_dropped(session, dropped)
                 # Subagent results should be assistant role, other system messages use user role
                 current_role = "assistant" if msg.sender_id == "subagent" else "user"
                 messages = self.context.build_messages(
@@ -632,9 +647,11 @@ class AgentLoop:
                     metadata=msg.metadata,
                     current_role=current_role,
                     memory_context=memory_context,
+                    context_summary=context_summary,
                 )
                 final_content, _, all_msgs, tool_timings = await self._run_agent_loop(messages)
                 _posthog_final_content = final_content
+                # skip uses trimmed history length (including summary msg if injected)
                 self._save_turn(session, all_msgs, 1 + len(history), tool_timings)
                 await self.sessions.save(session, tool_traces=self._pending_traces)
                 self._pending_traces = []
@@ -684,9 +701,16 @@ class AgentLoop:
                 if isinstance(message_tool, MessageTool):
                     message_tool.start_turn()
 
-            history = session.get_history(max_messages=0)
-            # Retrieve long-term memory for context
+            full_history = session.get_history(max_messages=0)
+            # Retrieve long-term memory before budget calculation so its size is included
             memory_context = await self._retrieve_memory(user_id, msg.content)
+            # Token-aware sliding window (includes all non-history token costs)
+            fixed_tokens = self._estimate_fixed_tokens(msg.content, memory_context)
+            history, dropped = self._trim_history(full_history, fixed_tokens, 0)
+            # Compress dropped messages into a summary (injected into system prompt)
+            context_summary: str | None = None
+            if dropped:
+                context_summary = await self._compress_dropped(session, dropped)
             initial_messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content,
@@ -694,6 +718,7 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id,
                 metadata=msg.metadata,
                 memory_context=memory_context,
+                context_summary=context_summary,
             )
 
             async def _bus_progress(event: AgentEvent) -> None:
@@ -715,6 +740,7 @@ class AgentLoop:
                 final_content = "I've completed processing but have no response to give."
             _posthog_final_content = final_content
 
+            # skip uses trimmed history length (including summary msg if injected)
             self._save_turn(session, all_msgs, 1 + len(history), tool_timings)
             await self.sessions.save(session, tool_traces=self._pending_traces)
             self._pending_traces = []
@@ -859,6 +885,150 @@ class AgentLoop:
         session.updated_at = datetime.now()
 
     # --- Long-term memory helpers ---
+
+    # --- Context window management ---
+
+    def _estimate_fixed_tokens(
+        self,
+        current_message: str,
+        memory_context: str | None = None,
+    ) -> int:
+        """Estimate tokens for everything except history messages.
+
+        Includes: system prompt, memory injection, runtime context,
+        current user message, and tool schema definitions.
+        """
+        tokens = count_text(self.context.build_system_prompt())
+
+        # Memory injection (appended to system prompt in builder)
+        if memory_context:
+            tokens += count_text(memory_context) + 60  # header text overhead
+
+        # Runtime context (prepended to user message in builder)
+        tokens += 50  # timestamp + channel + chat_id lines
+
+        # Current user message
+        tokens += count_text(current_message) + 10  # role overhead
+
+        # Tool schema definitions (sent alongside messages on every LLM call)
+        tool_defs = self.tools.get_definitions()
+        if tool_defs:
+            import json as _json
+            tokens += count_text(_json.dumps(tool_defs, ensure_ascii=False))
+
+        # Reserve space for compression summary (injected into system prompt when
+        # the sliding window drops messages). 300 max_tokens + ~50 formatting.
+        tokens += 350
+
+        return tokens
+
+    def _trim_history(
+        self,
+        history: list[dict],
+        fixed_tokens: int,
+        _unused: int = 0,
+    ) -> tuple[list[dict], list[dict]]:
+        """Token-aware history trimming (sliding window).
+
+        Keeps the most recent messages that fit within the token budget.
+        Aligns the cut point to a legal tool-call boundary and ensures
+        the result starts with a user message (never orphan assistant/tool).
+
+        Returns:
+            (trimmed_history, dropped_messages)
+        """
+        budget = self.context_window_tokens - fixed_tokens - self.max_output_tokens - 512
+
+        if budget <= 0:
+            logger.warning(
+                "Token budget exhausted by fixed overhead alone "
+                "(fixed={}, output={}, window={})",
+                fixed_tokens, self.max_output_tokens, self.context_window_tokens,
+            )
+            return [], list(history)
+
+        # Walk from newest to oldest, accumulate tokens
+        total = 0
+        cut_index = 0  # everything before this index gets dropped
+        for i in range(len(history) - 1, -1, -1):
+            msg_tokens = count_message(history[i])
+            if total + msg_tokens > budget:
+                cut_index = i + 1
+                break
+            total += msg_tokens
+
+        if cut_index == 0:
+            return history, []
+
+        # Align to legal tool-call boundary
+        trimmed = history[cut_index:]
+        start = Session._find_legal_start(trimmed)
+        if start:
+            cut_index += start
+            trimmed = history[cut_index:]
+
+        # Ensure trimmed history starts with a user message.
+        # If no user message exists in the trimmed slice, drop everything
+        # (the compressor summary will provide context instead).
+        found_user = False
+        for i, m in enumerate(trimmed):
+            if m.get("role") == "user":
+                if i > 0:
+                    cut_index += i
+                    trimmed = trimmed[i:]
+                found_user = True
+                break
+        if not found_user:
+            return [], list(history)
+
+        dropped = history[:cut_index]
+
+        if dropped:
+            logger.info(
+                "Sliding window: dropped {} messages ({} kept, budget={})",
+                len(dropped), len(trimmed), budget,
+            )
+
+        return trimmed, dropped
+
+    async def _compress_dropped(
+        self, session: Session, dropped: list[dict],
+    ) -> str | None:
+        """Compress dropped messages into a summary for context injection.
+
+        The summary is cached in session.metadata keyed by the number of
+        dropped messages. It is only regenerated when the drop count changes
+        (i.e. the sliding window has moved further).
+        """
+        if not dropped:
+            return None
+
+        # Cache key: number of dropped messages.
+        # This stays stable across turns as long as the window doesn't move.
+        drop_count = len(dropped)
+        cached = session.metadata.get("context_summary")
+        cached_drop_count = session.metadata.get("_ctx_summary_drop_count", 0)
+
+        if cached and cached_drop_count == drop_count:
+            return cached
+
+        # Generate new summary
+        try:
+            summary = await self._compressor.compress(dropped)
+            if summary:
+                formatted = (
+                    "[Earlier conversation summary]\n\n"
+                    f"{summary}\n\n"
+                    "[End of summary \u2014 recent messages follow]"
+                )
+                session.metadata["context_summary"] = formatted
+                session.metadata["_ctx_summary_drop_count"] = drop_count
+                return formatted
+        except Exception as e:
+            logger.warning("Context compression failed: {}", e)
+
+        return cached  # fallback to stale cache
+
 
     async def _retrieve_memory(self, user_id: str, query: str) -> str | None:
         """Retrieve relevant long-term memories for the user. Returns formatted text or None."""
