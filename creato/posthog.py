@@ -139,6 +139,15 @@ def get_posthog_context() -> PostHogContext:
     return _posthog_ctx.get()
 
 
+def update_context_properties(props: dict[str, Any]) -> None:
+    """Merge additional properties into the current PostHog context.
+
+    These will be included in the next $ai_generation event automatically.
+    """
+    ctx = _posthog_ctx.get()
+    ctx.properties.update(props)
+
+
 # ---------------------------------------------------------------------------
 # Event capture
 # ---------------------------------------------------------------------------

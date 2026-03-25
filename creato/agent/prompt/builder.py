@@ -39,8 +39,7 @@ class PromptBuilder:
         if self._cached_system_prompt is not None:
             return self._cached_system_prompt
 
-        workspace_path = str(self.workspace.expanduser().resolve())
-        parts = [build_identity(workspace_path, tool_names=self._tool_names)]
+        parts = [build_identity(tool_names=self._tool_names)]
 
         # Always-on skills (injected into every request)
         always_skills = self.skills.get_always_skills()

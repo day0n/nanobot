@@ -21,6 +21,7 @@ from creato.posthog import (
     posthog_timer,
     reset_posthog_context,
     set_posthog_context,
+    update_context_properties,
 )
 
 from creato.agent.context.compressor import ContextCompressor
@@ -261,6 +262,33 @@ class AgentLoop:
             except Exception:
                 pass
             _llm_span.__enter__()
+
+            # Token breakdown for PostHog — classify input tokens by role
+            _sys_tk = _hist_tk = _tool_res_tk = _user_tk = 0
+            _last_user_idx = -1
+            for _i, _m in enumerate(messages):
+                if _m.get("role") == "user":
+                    _last_user_idx = _i
+            for _i, _m in enumerate(messages):
+                _tk = count_message(_m)
+                _role = _m.get("role")
+                if _role == "system":
+                    _sys_tk += _tk
+                elif _role == "tool":
+                    _tool_res_tk += _tk
+                elif _role == "user" and _i == _last_user_idx:
+                    _user_tk = _tk
+                else:
+                    _hist_tk += _tk  # assistant, agent, earlier user messages
+            _tool_def_tk = count_text(json.dumps(tool_defs or [], ensure_ascii=False)) if tool_defs else 0
+            update_context_properties({
+                "token_breakdown_system": _sys_tk,
+                "token_breakdown_history": _hist_tk,
+                "token_breakdown_tool_defs": _tool_def_tk,
+                "token_breakdown_tool_results": _tool_res_tk,
+                "token_breakdown_current_user": _user_tk,
+                "token_breakdown_total_estimated": _sys_tk + _hist_tk + _tool_def_tk + _tool_res_tk + _user_tk,
+            })
 
             try:
                 stream = self.provider.chat_stream_with_retry(
