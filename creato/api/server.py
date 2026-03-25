@@ -97,6 +97,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         agent_messages_col,
         agent_tool_traces_col,
         mongo_client,
+        db,
     )
     from creato.database.redis import init_redis, test_redis, redis_client
     from creato.database.rabbitmq import (
@@ -237,6 +238,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         summary_model=cfg.agents.defaults.summary_model,
         summary_api_key=_summary_key,
         memory=_memory,
+        max_output_tokens=cfg.agents.defaults.max_tokens,
     )
     app.state.agent = agent
 
