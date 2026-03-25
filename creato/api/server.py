@@ -97,8 +97,8 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         agent_messages_col,
         agent_tool_traces_col,
         mongo_client,
-        db,
     )
+    import creato.database.mongo as _mongo_mod  # late-bound access to db
     from creato.database.redis import init_redis, test_redis, redis_client
     from creato.database.rabbitmq import (
         init_rabbitmq,
@@ -249,7 +249,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         if user_id in _identified_users:
             return  # Already identified this process, zero cost
         try:
-            user_doc = await db["user"].find_one(
+            user_doc = await _mongo_mod.db["user"].find_one(
                 {"user_id": user_id}, {"user_email": 1},
             )
             if user_doc and user_doc.get("user_email"):
