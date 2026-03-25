@@ -23,7 +23,7 @@ class Mem0Memory(MemoryProvider):
         collection_name: str = "memories",
         embedding_model_dims: int = 1536,
         llm_model: str = "gpt-4o-mini",
-        embedder_model: str = "text-embedding-ada-002",
+        embedder_model: str = "text-embedding-3-small",
         openai_api_key: str | None = None,
     ):
         from mem0 import Memory

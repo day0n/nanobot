@@ -192,9 +192,9 @@ class MemoryConfig(Base):
 
     enabled: bool = False  # Master switch — set CREATO_MEMORY__ENABLED=true to activate
     collection_name: str = "memories"  # Collection in agent_db for storing memories
-    embedding_model_dims: int = 1536  # Embedding dimensions (1536 for text-embedding-ada-002)
+    embedding_model_dims: int = 1536  # Embedding dimensions (1536 for text-embedding-3-small)
     llm_model: str = "gpt-4o-mini"  # Cheap model for memory extraction
-    embedder_model: str = "text-embedding-ada-002"  # Embedding model
+    embedder_model: str = "text-embedding-3-small"  # Embedding model
     search_limit: int = 5  # Max memories to retrieve per query
 
 
