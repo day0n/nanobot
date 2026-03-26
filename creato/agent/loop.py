@@ -38,22 +38,24 @@ from creato.agent.events import (
     tool_event,
     tool_failed,
     tool_started,
+    workflow_paused,
     workflow_started,
 )
 from creato.agent.request_context import reset_request_context, set_request_context
 from creato.agent.memory import MemoryProvider
-from creato.agent.subagent import SubagentManager
-from creato.agent.tools.base import ToolResult, WorkflowExecution
+from creato.agent.executor import AgentExecutor, ExecutorHooks
+from creato.agent.subagents import SubagentTool, SubagentTypeRegistry, SubagentContext, BUILTIN_SUBAGENT_TYPES
+from creato.agent.tools.base import Tool
 from creato.agent.skills import BUILTIN_SKILLS_DIR
 from creato.agent.tools.filesystem import EditFileTool, ListDirTool, LoadSkillTool, ReadFileTool, WriteFileTool
 from creato.agent.tools.message import MessageTool
 from creato.agent.tools.registry import ToolRegistry
 from creato.agent.tools.shell import ExecTool
-from creato.agent.tools.spawn import SpawnTool
+from creato.agent.subagents.tool import SubagentTool
 from creato.agent.tools.opencreator import EditWorkflowTool, GetNodeSpecTool, GetWorkflowTool, GetWorkflowResultsTool, RunWorkflowTool
 from creato.agent.tools.web import WebFetchTool, WebSearchTool
 from creato.bus.events import InboundMessage, OutboundMessage
-from creato.providers.base import LLMProvider, LLMResponse
+from creato.providers.base import LLMProvider
 from creato.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
@@ -118,13 +120,14 @@ class AgentLoop:
             raise ValueError("session_manager is required (must not be None)")
         self.sessions = session_manager
         self.tools = ToolRegistry()
-        self.subagents = SubagentManager(
-            provider=provider,
+        self._subagent_registry = SubagentTypeRegistry()
+        for sa_type in BUILTIN_SUBAGENT_TYPES:
+            self._subagent_registry.register(sa_type)
+        self._subagent_context = SubagentContext(
             workspace=workspace,
-            on_result=self._handle_subagent_result,
-            model=self.model,
             web_search_config=self.web_search_config,
             web_proxy=web_proxy,
+            api_config=self.api_config,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
         )
@@ -165,7 +168,15 @@ class AgentLoop:
         # ))
         self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
-        self.tools.register(SpawnTool(manager=self.subagents))
+        self._subagent_tool = SubagentTool(
+            type_registry=self._subagent_registry,
+            context=self._subagent_context,
+            skills_loader=self.context.skills,
+            provider=self.provider,
+            parent_model=self.model,
+            parent_tools=self.tools,
+        )
+        self.tools.register(self._subagent_tool)
         self.tools.register(GetWorkflowTool(api_base=self.api_config.internal_api_base))
         self.tools.register(GetWorkflowResultsTool(api_base=self.api_config.internal_api_base))
         self.tools.register(GetNodeSpecTool())
@@ -183,20 +194,9 @@ class AgentLoop:
 
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None, session_key: str | None = None) -> None:
         """Update context for all tools that need routing info."""
-        for name in ("message", "spawn"):
-            if tool := self.tools.get(name):
-                if hasattr(tool, "set_context"):
-                    if name == "spawn":
-                        tool.set_context(channel, chat_id, session_key=session_key)
-                    elif name == "message":
-                        tool.set_context(channel, chat_id, *([message_id] if message_id else []))
-
-    @staticmethod
-    def _strip_think(text: str | None) -> str | None:
-        """Remove <think>…</think> blocks that some models embed in content."""
-        if not text:
-            return None
-        return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
+        if tool := self.tools.get("message"):
+            if hasattr(tool, "set_context"):
+                tool.set_context(channel, chat_id, *([message_id] if message_id else []))
 
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
@@ -214,289 +214,92 @@ class AgentLoop:
         initial_messages: list[dict],
         on_progress: Callable[[AgentEvent], Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str], list[dict], dict[str, dict]]:
-        """Run the agent iteration loop.
+        """Run the agent iteration loop via AgentExecutor."""
+        if hasattr(self, '_subagent_tool'):
+            self._subagent_tool.set_progress(on_progress)
 
-        Returns:
-            (final_content, tools_used, messages, tool_timings)
-            tool_timings maps tool_call_id -> {name, args, started_at, completed_at, duration_ms, error}
-        """
-        messages = initial_messages
-        iteration = 0
-        final_content = None
-        tools_used: list[str] = []
-        tool_timings: dict[str, dict] = {}
+        hooks = self._build_hooks(on_progress)
+
         _agent_span = SafeSpan("gen_ai.invoke_agent", "invoke_agent opencreator_agent")
         _agent_span.set_data("gen_ai.agent.name", "opencreator_agent")
         _agent_span.set_data("gen_ai.request.model", self.model)
         _agent_span.__enter__()
 
-        while iteration < self.max_iterations:
-            iteration += 1
+        try:
+            executor = AgentExecutor(
+                provider=self.provider,
+                model=self.model,
+                tools=self.tools,
+                max_iterations=self.max_iterations,
+                hooks=hooks,
+            )
+            result = await executor.run(initial_messages)
+        finally:
+            _agent_span.__exit__(None, None, None)
+
+        _agent_span.set_data("gen_ai.response.text", (result.content or "")[:4096])
+        return result.content, result.tools_used, result.messages, result.tool_timings
+
+    def _build_hooks(self, on_progress: Callable[[AgentEvent], Awaitable[None]] | None) -> ExecutorHooks:
+        """Build ExecutorHooks that inject Sentry, PostHog, and SSE dispatch."""
+
+        async def _on_step_start(step: int) -> None:
             if on_progress:
-                await on_progress(step_started(iteration))
+                await on_progress(step_started(step))
 
-            tool_defs = self.tools.get_definitions()
+        async def _on_step_end(step: int) -> None:
+            if on_progress:
+                await on_progress(step_completed(step))
 
-            # --- Stream LLM response ---
-            accumulated_content = ""
-            all_tool_calls: list = []
-            finish_reason = "stop"
-            thinking_blocks = None
-            reasoning_content = None
-            usage: dict[str, int] = {}
+        async def _on_text_delta(text: str) -> None:
+            if on_progress:
+                await on_progress(message_delta(text))
 
-            _llm_span = SafeSpan("gen_ai.request", f"chat {self.model}")
-            _llm_span.set_data("gen_ai.request.model", self.model)
-            tool_names = [t.get("function", {}).get("name", "") for t in (tool_defs or [])]
-            if tool_names:
-                _llm_span.set_data("gen_ai.request.available_tools", json.dumps(tool_names))
-            try:
-                _llm_span.set_data("gen_ai.request.messages", json.dumps(messages, ensure_ascii=False, default=str)[:8192])
-            except Exception:
-                pass
-            _llm_span.__enter__()
+        async def _on_tool_start(name: str, call_id: str, args: dict) -> None:
+            if on_progress:
+                await on_progress(tool_started(name, call_id, args))
 
-            # Token breakdown for PostHog — classify input tokens by role
-            _sys_tk = _hist_tk = _tool_res_tk = _user_tk = 0
-            _last_user_idx = -1
-            for _i, _m in enumerate(messages):
-                if _m.get("role") == "user":
-                    _last_user_idx = _i
-            for _i, _m in enumerate(messages):
-                _tk = count_message(_m)
-                _role = _m.get("role")
-                if _role == "system":
-                    _sys_tk += _tk
-                elif _role == "tool":
-                    _tool_res_tk += _tk
-                elif _role == "user" and _i == _last_user_idx:
-                    _user_tk = _tk
+        async def _on_tool_end(name: str, call_id: str, duration_ms: int, error: str | None, args: dict = None, output: str = "") -> None:
+            capture_span(
+                span_id=call_id, name=name, input_data=args or {}, output_data=output,
+                latency=duration_ms / 1000.0, is_error=bool(error), error=error,
+            )
+            if on_progress:
+                if error:
+                    await on_progress(tool_failed(call_id, error))
                 else:
-                    _hist_tk += _tk  # assistant, agent, earlier user messages
-            _tool_def_tk = count_text(json.dumps(tool_defs or [], ensure_ascii=False)) if tool_defs else 0
-            update_context_properties({
-                "token_breakdown_system": _sys_tk,
-                "token_breakdown_history": _hist_tk,
-                "token_breakdown_tool_defs": _tool_def_tk,
-                "token_breakdown_tool_results": _tool_res_tk,
-                "token_breakdown_current_user": _user_tk,
-                "token_breakdown_total_estimated": _sys_tk + _hist_tk + _tool_def_tk + _tool_res_tk + _user_tk,
-            })
+                    await on_progress(tool_completed(call_id, duration_ms))
 
-            try:
-                stream = self.provider.chat_stream_with_retry(
-                    messages=messages,
-                    tools=tool_defs,
-                    model=self.model,
-                )
-                async for chunk in stream:
-                    if chunk.text_delta:
-                        accumulated_content += chunk.text_delta
-                        if on_progress:
-                            await on_progress(message_delta(chunk.text_delta))
-                    if chunk.completed_tool_calls:
-                        all_tool_calls.extend(chunk.completed_tool_calls)
-                    if chunk.finish_reason:
-                        finish_reason = chunk.finish_reason
-                    if chunk.thinking_blocks:
-                        thinking_blocks = chunk.thinking_blocks
-                    if chunk.usage:
-                        usage = chunk.usage
-                    if chunk.error_content:
-                        accumulated_content = chunk.error_content
-                        finish_reason = "error"
-            except asyncio.CancelledError:
-                await stream.aclose()
-                raise
-            finally:
-                if usage:
-                    _llm_span.set_data("gen_ai.usage.input_tokens", usage.get("prompt_tokens", 0))
-                    _llm_span.set_data("gen_ai.usage.output_tokens", usage.get("completion_tokens", 0))
-                    _llm_span.set_data("gen_ai.usage.total_tokens", usage.get("total_tokens", 0))
-                _llm_span.__exit__(None, None, None)
-
-            # Reconstruct LLMResponse from accumulated chunks
-            response = LLMResponse(
-                content=accumulated_content or None,
-                tool_calls=all_tool_calls,
-                finish_reason=finish_reason,
-                usage=usage,
-                reasoning_content=reasoning_content,
-                thinking_blocks=thinking_blocks,
-            )
-
-            if response.has_tool_calls:
-                tool_call_dicts = [
-                    tc.to_openai_tool_call()
-                    for tc in response.tool_calls
-                ]
-                messages = self.context.add_assistant_message(
-                    messages, response.content, tool_call_dicts,
-                    reasoning_content=response.reasoning_content,
-                    thinking_blocks=response.thinking_blocks,
-                )
-
-                for tool_call in response.tool_calls:
-                    tools_used.append(tool_call.name)
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-
-                    if on_progress:
-                        await on_progress(tool_started(tool_call.name, tool_call.id, tool_call.arguments))
-
-                    from datetime import datetime as _dt
-                    started_at = _dt.now()
-                    error_msg = None
-                    result_obj: str | ToolResult | WorkflowExecution
-                    _tool_span = SafeSpan("gen_ai.execute_tool", f"execute_tool {tool_call.name}")
-                    _tool_span.set_data("gen_ai.tool.name", tool_call.name)
-                    _tool_span.set_data("gen_ai.tool.input", json.dumps(tool_call.arguments, ensure_ascii=False, default=str)[:4096])
-                    _tool_span.__enter__()
-                    try:
-                        result_obj = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    except Exception as e:
-                        error_msg = str(e)
-                        result_obj = f"Error: {e}"
-                    finally:
-                        if error_msg:
-                            _tool_span.set_status("internal_error")
-                        else:
-                            output_str = result_obj if isinstance(result_obj, str) else str(getattr(result_obj, 'content', result_obj))
-                            _tool_span.set_data("gen_ai.tool.output", output_str[:4096])
-                        _tool_span.__exit__(None, None, None)
-                    completed_at = _dt.now()
-                    duration_ms = int((completed_at - started_at).total_seconds() * 1000)
-
-                    # Handle WorkflowExecution — consume event stream, emit workflow.* SSE events
-                    # Use hasattr as a robust check (avoids class-identity issues across reloads)
-                    _is_wf_exec = isinstance(result_obj, WorkflowExecution) or hasattr(result_obj, "event_stream")
-                    if _is_wf_exec and not isinstance(result_obj, (str, ToolResult)):
-                        if not isinstance(result_obj, WorkflowExecution):
-                            logger.warning(
-                                "WorkflowExecution isinstance failed! type={} id(class)={} expected_id={}",
-                                type(result_obj), id(type(result_obj)), id(WorkflowExecution),
-                            )
-                        if on_progress:
-                            await on_progress(workflow_started({
-                                "flow_task_id": result_obj.flow_task_id,
-                                "run_id": result_obj.run_id,
-                                "ws_id": result_obj.ws_id,
-                            }))
-                        result_str = "Workflow completed successfully"
-                        _stream_got_terminal = False
-                        try:
-                            async for raw_event in result_obj.event_stream:
-                                et = raw_event.get("event_type")
-                                constructor = WORKFLOW_EVENT_MAP.get(et)
-                                if constructor and on_progress:
-                                    await on_progress(constructor(raw_event))
-                                # select → stop consuming, return control to LLM
-                                if et == "node_status" and raw_event.get("status") == "select":
-                                    node_id = raw_event.get("node_id", "unknown")
-                                    result_str = f"Workflow paused: node {node_id} needs user selection on the canvas."
-                                    _stream_got_terminal = True
-                                    break
-                                if et == "node_status" and raw_event.get("status") == "failed":
-                                    error_msg = raw_event.get("error_msg", "Node execution failed")
-                                    result_str = f"Workflow failed: {error_msg}"
-                                    _stream_got_terminal = True
-                                    break
-                                if et == "node_time_out":
-                                    node_id = raw_event.get("node_id", "unknown")
-                                    result_str = f"Workflow failed: node {node_id} timed out"
-                                    _stream_got_terminal = True
-                                    break
-                                if et in ("finish_flow", "flow_killed"):
-                                    _stream_got_terminal = True
-                                    break
-                        except Exception as stream_err:
-                            logger.error("Workflow event stream error: {}", stream_err)
-                            error_msg = str(stream_err)
-                            result_str = f"Error consuming workflow events: {stream_err}"
-                            _stream_got_terminal = True
-
-                        # If stream ended without a terminal event, it was a timeout.
-                        # Don't kill — Consumer continues in background, results saved to assets.
-                        if not _stream_got_terminal:
-                            result_str = (
-                                "The workflow is still generating and may take a bit longer. "
-                                "Results will be saved automatically to your assets — nothing will be lost. "
-                                "You can leave or refresh the page, and check the assets page later. "
-                                "If generation fails, you will not be charged."
-                            )
-
-                        # Recalculate duration after stream consumption
-                        completed_at = _dt.now()
-                        duration_ms = int((completed_at - started_at).total_seconds() * 1000)
-
-                    # Extract ToolResult events and emit them
-                    elif isinstance(result_obj, ToolResult):
-                        for evt in result_obj.events:
-                            if on_progress:
-                                await on_progress(tool_event(evt.get("name", "tool.output"), evt.get("data", {})))
-                        result_str = result_obj.content
-                    else:
-                        result_str = result_obj
-
-                    if on_progress:
-                        if error_msg:
-                            await on_progress(tool_failed(tool_call.id, error_msg))
-                        else:
-                            await on_progress(tool_completed(tool_call.id, duration_ms))
-
-                    tool_timings[tool_call.id] = {
-                        "name": tool_call.name,
-                        "args": tool_call.arguments,
-                        "started_at": started_at,
-                        "completed_at": completed_at,
-                        "duration_ms": duration_ms,
-                        "error": error_msg,
-                        "raw_output": result_str,
-                    }
-
-                    # PostHog tool execution span
-                    capture_span(
-                        span_id=tool_call.id,
-                        name=tool_call.name,
-                        input_data=tool_call.arguments,
-                        output_data=result_str if isinstance(result_str, str) else str(result_str),
-                        latency=duration_ms / 1000.0,
-                        is_error=bool(error_msg),
-                        error=error_msg,
-                    )
-
-                    messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result_str
-                    )
-            else:
-                clean = self._strip_think(response.content)
-                # Don't persist error responses to session history — they can
-                # poison the context and cause permanent 400 loops (#1303).
-                if response.finish_reason == "error":
-                    logger.error("LLM returned error: {}", (clean or "")[:200])
-                    final_content = clean or "Sorry, I encountered an error calling the AI model."
-                    break
-                messages = self.context.add_assistant_message(
-                    messages, clean, reasoning_content=response.reasoning_content,
-                    thinking_blocks=response.thinking_blocks,
-                )
-                final_content = clean
-                break
-
+        async def _on_tool_event(event_name: str, data: dict) -> None:
             if on_progress:
-                await on_progress(step_completed(iteration))
+                await on_progress(tool_event(event_name, data))
 
-        if final_content is None and iteration >= self.max_iterations:
-            logger.warning("Max iterations ({}) reached", self.max_iterations)
-            final_content = (
-                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
-                "without completing the task. You can try breaking the task into smaller steps."
-            )
+        async def _on_workflow_start(data: dict) -> None:
+            if on_progress:
+                await on_progress(workflow_started(data))
 
-        _agent_span.set_data("gen_ai.response.text", (final_content or "")[:4096])
-        _agent_span.__exit__(None, None, None)
+        async def _on_workflow_event(raw_event: dict) -> None:
+            if on_progress:
+                et = raw_event.get("event_type")
+                constructor = WORKFLOW_EVENT_MAP.get(et)
+                if constructor:
+                    await on_progress(constructor(raw_event))
 
-        return final_content, tools_used, messages, tool_timings
+        async def _on_workflow_paused(data: dict) -> None:
+            if on_progress:
+                await on_progress(workflow_paused(data))
+
+        return ExecutorHooks(
+            on_step_start=_on_step_start,
+            on_step_end=_on_step_end,
+            on_text_delta=_on_text_delta,
+            on_tool_start=_on_tool_start,
+            on_tool_end=_on_tool_end,
+            on_tool_event=_on_tool_event,
+            on_workflow_start=_on_workflow_start,
+            on_workflow_event=_on_workflow_event,
+            on_workflow_paused=_on_workflow_paused,
+        )
 
     async def _locked_process(self, msg: InboundMessage, *, session_key: str | None = None, **kwargs) -> OutboundMessage | None:
         """Process a message with per-session lock + global concurrency gate.
@@ -516,12 +319,6 @@ class AgentLoop:
         gate = self._concurrency_gate or nullcontext()
         async with lock, gate:
             return await self._process_message(msg, session_key=key, **kwargs)
-
-    async def _handle_subagent_result(self, msg: InboundMessage) -> None:
-        """Process subagent result with proper session locking."""
-        response = await self._locked_process(msg)
-        if response:
-            logger.info("Subagent result processed: {}", response.content[:120])
 
     async def close_mcp(self) -> None:
         """Drain pending background archives, then close MCP connections."""
