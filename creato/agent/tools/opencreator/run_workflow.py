@@ -101,7 +101,7 @@ class RunWorkflowTool(Tool):
         start_ids = node_ids if node_ids else None
         end_ids = node_ids if node_ids else None
         try:
-            flow_task_id = await self._engine.submit_start(
+            flow_task_id, flow_run_id = await self._engine.submit_start(
                 nodes=nodes,
                 edges=edges,
                 ws_id=ws_id,
@@ -146,7 +146,7 @@ class RunWorkflowTool(Tool):
 
         return WorkflowExecution(
             flow_task_id=flow_task_id,
-            run_id="",
+            run_id=flow_run_id,
             ws_id=ws_id,
             event_stream=_event_stream(),
         )

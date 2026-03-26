@@ -167,9 +167,12 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             set_dispatch_fn(event_dispatch)
 
             # Register RunWorkflowTool into the agent's tool registry
-            from creato.agent.tools.opencreator import RunWorkflowTool
+            from creato.agent.tools.opencreator import ContinueWorkflowTool, RunWorkflowTool
             app.state.agent.tools.register(RunWorkflowTool(
                 api_base=cfg.api.internal_api_base,
+                workflow_engine=app.state.workflow_engine,
+            ))
+            app.state.agent.tools.register(ContinueWorkflowTool(
                 workflow_engine=app.state.workflow_engine,
             ))
             app.state.agent._sync_tool_names()  # update prompt after dynamic tool registration
@@ -276,6 +279,11 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         # session_id is passed directly from frontend as the primary key
         session_id = body.session_id
 
+        # Merge frontend metadata with flow_id
+        request_metadata = dict(body.metadata or {})
+        if flow_id:
+            request_metadata["flow_id"] = flow_id
+
         # Private context for tools (not exposed to LLM prompt)
         private_context = {
             "auth_token": auth_user.token,
@@ -283,11 +291,9 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             "time_zone": x_time_zone.strip() if isinstance(x_time_zone, str) and x_time_zone.strip() else None,
             "user_id": auth_user.user_id,
         }
-
-        # Merge frontend metadata with flow_id
-        request_metadata = dict(body.metadata or {})
-        if flow_id:
-            request_metadata["flow_id"] = flow_id
+        continue_workflow = request_metadata.get("continue_workflow")
+        if isinstance(continue_workflow, dict):
+            private_context["continue_workflow"] = continue_workflow
 
         async def event_stream():
             queue: asyncio.Queue[AgentEvent] = asyncio.Queue()

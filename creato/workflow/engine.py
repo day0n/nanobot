@@ -42,8 +42,8 @@ class WorkflowEngine:
         start_ids: List[str] | None = None,
         end_ids: List[str] | None = None,
         user_selection: Any = None,
-    ) -> str:
-        """Build DAG, persist task, publish to Redis Stream. Returns flow_task_id."""
+    ) -> tuple[str, str]:
+        """Build DAG, persist task, publish to Redis Stream."""
         # 1. Filter non-executable nodes
         nodes, edges = self._filter_non_executable(nodes, edges)
 
@@ -96,8 +96,8 @@ class WorkflowEngine:
             task_id=flow_task_id,
         )
 
-        logger.info(f"Workflow submitted: {flow_task_id=} {ws_id=}")
-        return flow_task_id
+        logger.info(f"Workflow submitted: {flow_task_id=} {flow_run_id=} {ws_id=}")
+        return flow_task_id, flow_run_id
 
     async def submit_continue(
         self,
