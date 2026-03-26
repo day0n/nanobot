@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+from collections import OrderedDict
 from contextlib import AsyncExitStack, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -88,8 +89,6 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
-        summary_model: str | None = None,
-        summary_api_key: str | None = None,
         summary_provider: LLMProvider | None = None,
         memory: MemoryProvider | None = None,
         max_output_tokens: int = 8192,
@@ -100,8 +99,6 @@ class AgentLoop:
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
-        self._summary_model = summary_model
-        self._summary_api_key = summary_api_key
         self._summary_provider = summary_provider
         self.max_iterations = max_iterations
         self.context_window_tokens = context_window_tokens
@@ -137,7 +134,7 @@ class AgentLoop:
         self._mcp_connected = False
         self._mcp_connecting = False
         self._background_tasks: list[asyncio.Task] = []
-        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._session_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         # CREATO_MAX_CONCURRENT_REQUESTS: <=0 means unlimited; default 3.
         _max = int(os.environ.get("CREATO_MAX_CONCURRENT_REQUESTS", "3"))
         self._concurrency_gate: asyncio.Semaphore | None = (
@@ -510,7 +507,12 @@ class AgentLoop:
                          in their chat_id).
         """
         key = session_key or msg.session_key
+        if key in self._session_locks:
+            self._session_locks.move_to_end(key)
         lock = self._session_locks.setdefault(key, asyncio.Lock())
+        # Evict oldest locks to prevent unbounded growth
+        while len(self._session_locks) > 1000:
+            self._session_locks.popitem(last=False)
         gate = self._concurrency_gate or nullcontext()
         async with lock, gate:
             return await self._process_message(msg, session_key=key, **kwargs)

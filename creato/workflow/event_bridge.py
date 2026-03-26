@@ -10,15 +10,36 @@ This module owns no infrastructure — it's pure in-process routing.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
-_event_queues: dict[str, asyncio.Queue] = {}
+_MAX_QUEUES = 500
+_TTL_SECONDS = 4 * 3600  # 4 hours (aligned with Consumer's 3h lock TTL)
+
+# ws_id → (queue, registered_at_monotonic)
+_event_queues: dict[str, tuple[asyncio.Queue, float]] = {}
+
+
+def _sweep_expired() -> None:
+    """Remove queues older than _TTL_SECONDS. Called lazily from register/dispatch."""
+    now = time.monotonic()
+    expired = [k for k, (_, t) in _event_queues.items() if now - t > _TTL_SECONDS]
+    for k in expired:
+        _event_queues.pop(k, None)
 
 
 def register(ws_id: str) -> asyncio.Queue:
     """Register an event queue for a workflow execution. Returns the queue."""
+    # Sweep before adding to stay under the cap
+    if len(_event_queues) >= _MAX_QUEUES:
+        _sweep_expired()
+    # If still at cap after sweep, evict the oldest entry
+    while len(_event_queues) >= _MAX_QUEUES:
+        oldest = next(iter(_event_queues))
+        _event_queues.pop(oldest, None)
+
     q: asyncio.Queue = asyncio.Queue()
-    _event_queues[ws_id] = q
+    _event_queues[ws_id] = (q, time.monotonic())
     return q
 
 
@@ -29,8 +50,13 @@ def unregister(ws_id: str) -> None:
 
 async def dispatch(ws_id: str, event: dict[str, Any]) -> bool:
     """Dispatch an event to the registered queue. Returns True if delivered."""
-    q = _event_queues.get(ws_id)
-    if q is not None:
+    entry = _event_queues.get(ws_id)
+    if entry is not None:
+        q, registered_at = entry
+        # Auto-expire stale queues
+        if time.monotonic() - registered_at > _TTL_SECONDS:
+            _event_queues.pop(ws_id, None)
+            return False
         await q.put(event)
         return True
     return False

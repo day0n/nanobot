@@ -6,6 +6,7 @@ Memories are stored per user_id in the configured agent database.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from loguru import logger
@@ -67,7 +68,7 @@ class Mem0Memory(MemoryProvider):
         if not user_id:
             return []
         try:
-            raw = self._memory.search(query=query, user_id=user_id, limit=limit)
+            raw = await asyncio.to_thread(self._memory.search, query=query, user_id=user_id, limit=limit)
             # mem0 returns {"results": [...]} or a list directly depending on version
             if isinstance(raw, dict):
                 results = raw.get("results", [])
@@ -106,6 +107,6 @@ class Mem0Memory(MemoryProvider):
             ]
             if not conversation:
                 return
-            self._memory.add(conversation, user_id=user_id)
+            await asyncio.to_thread(self._memory.add, conversation, user_id=user_id)
         except Exception as e:
             logger.warning("Mem0 store failed for user {}: {}", user_id, e)

@@ -31,7 +31,6 @@ class AgentDefaults(Base):
 
     workspace: str = "~/.creato/workspace"
     model: str = "openai/gpt-4.1"
-    provider: str = ""  # Unused — routing is now by model prefix (e.g. "openai/gpt-4.1")
     max_tokens: int = 8192
     context_window_tokens: int = 65_536
     temperature: float = 0.1

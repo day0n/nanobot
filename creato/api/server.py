@@ -237,8 +237,6 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         session_manager=session_manager,
         mcp_servers=cfg.tools.mcp_servers,
         channels_config=cfg.channels,
-        summary_model=cfg.agents.defaults.summary_model,
-        summary_api_key=None,
         summary_provider=_summary_provider,
         memory=_memory,
         max_output_tokens=cfg.agents.defaults.max_tokens,
