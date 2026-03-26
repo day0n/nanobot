@@ -373,6 +373,17 @@ def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result = []
     for msg in messages:
         clean: dict[str, Any] = {"role": msg.get("role", "unknown")}
+
+        # Preserve tool message metadata (name, tool_call_id)
+        if msg.get("name"):
+            clean["name"] = msg["name"]
+        if msg.get("tool_call_id"):
+            clean["tool_call_id"] = msg["tool_call_id"]
+
+        # Preserve assistant tool_calls
+        if msg.get("tool_calls"):
+            clean["tool_calls"] = msg["tool_calls"]
+
         content = msg.get("content")
         if isinstance(content, str):
             clean["content"] = content[:8000]  # Cap per-message size
