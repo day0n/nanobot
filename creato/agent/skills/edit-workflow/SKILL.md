@@ -43,10 +43,10 @@ trigger: Before calling edit_workflow tool
 ## 节点目录
 
 **Input**: textInput(→text), imageInput(→image), videoInput(→video), audioInput(→audio)
-**Text**: textGenerator(text,image,video,audio→text), scriptSplit(text→text)
-**Image**: imageMaker(text→image), imageToImage(image,text→image), relight(image→image), imageAngleControl(image→image), imageUpscaler(image→image), backgroundEditor(image,text→image)
-**Video**: textToVideo(text→video), videoMaker(image,text→video), videoToVideo(video,text,subject,style→video), klingMotionControl(image,video,text→video), videoLipSync(video,audio→video), imageAudioToVideo(image,audio,text→video), videoUpscaler(video→video)
-**Audio**: textToSpeech(text→audio), musicGenerator(text→audio), voiceCloner(audio,text→audio)
+**Text**: textGenerator(text,image,video,audio→text) 文本生成/分析, scriptSplit(text→text) 按编号拆分文本
+**Image**: imageMaker(text→image) 文生图, imageToImage(image,text→image) 图生图/图片编辑, relight(image→image) 重打光, imageAngleControl(image→image) 改角度, imageUpscaler(image→image) 超分, backgroundEditor(image,text→image) 换/去背景
+**Video**: textToVideo(text→video) 文生视频, videoMaker(image,text→video) 图生视频, videoToVideo(video,text,subject,style→video) 视频编辑, klingMotionControl(image,video,text→video) 动作迁移, videoLipSync(video,audio→video) 视频对口型, imageAudioToVideo(image,audio,text→video) 图+音频生视频, videoUpscaler(video→video) 视频超分
+**Audio**: textToSpeech(text→audio) 文字转语音, musicGenerator(text→audio) 生成音乐, voiceCloner(audio,text→audio) 声音克隆
 **不可执行**: groupNode, stickyNodesNode, assembleNow
 **废弃**: syncVideoAudio, imageAnnotationNode, videoAnnotationNode, describeImage, oneClickStyle
 

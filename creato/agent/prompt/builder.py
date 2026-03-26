@@ -3,10 +3,14 @@
 Prompt assembly order:
 1. Identity + guidelines layer — build_identity() from identity.py
 2. Skills layer                — always-on skills + skills summary from SkillsLoader
-3. Memory layer                — long-term memory injection (per-request, not cached)
 
-The runtime context (time, channel, flow_id) is NOT in the system prompt.
-It is prepended to the user message via build_runtime_context().
+The system prompt contains ONLY static content (identity + skills) so that
+provider-level prompt caching can hit on every request.
+
+Dynamic per-request context is injected into the messages list instead:
+- Runtime context (time, channel, flow_id) → prepended to the user message
+- Context summary (compressed dropped history) → separate user message before history
+- Long-term memory → separate user message before history
 """
 
 import base64
@@ -76,7 +80,12 @@ class PromptBuilder:
         memory_context: str | None = None,
         context_summary: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Build the complete message list for an LLM call."""
+        """Build the complete message list for an LLM call.
+
+        Dynamic context (context_summary, memory_context) is injected as a
+        separate user message BEFORE history, keeping the system prompt purely
+        static so provider-level prompt caching hits reliably.
+        """
         runtime_ctx = build_runtime_context(channel, chat_id, metadata)
         user_content = self._build_user_content(current_message, media)
 
@@ -87,26 +96,35 @@ class PromptBuilder:
         else:
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
 
-        # Build system prompt with optional long-term memory injection
         system = self.build_system_prompt()
+
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+
+        # Inject dynamic context as a separate user message before history.
+        # This keeps the system prompt hash stable for prompt caching while
+        # still giving the model access to conversation summary and user memory.
+        dynamic_parts: list[str] = []
         if context_summary:
-            system += (
-                "\n\n---\n\n# Earlier Conversation Summary\n\n"
-                + context_summary
+            dynamic_parts.append(
+                "# Earlier Conversation Summary\n\n" + context_summary
             )
         if memory_context:
-            system += (
-                "\n\n---\n\n# What You Know About This User\n\n"
-                "The following are facts you remember about this user from previous conversations. "
+            dynamic_parts.append(
+                "# What You Know About This User\n\n"
+                "The following are facts you remember about this user "
+                "from previous conversations. "
                 "Use them to provide personalized, context-aware responses.\n\n"
                 + memory_context
             )
+        if dynamic_parts:
+            messages.append({
+                "role": "user",
+                "content": "\n\n---\n\n".join(dynamic_parts),
+            })
 
-        return [
-            {"role": "system", "content": system},
-            *history,
-            {"role": current_role, "content": merged},
-        ]
+        messages.extend(history)
+        messages.append({"role": current_role, "content": merged})
+        return messages
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """Build user message content with optional base64-encoded images."""

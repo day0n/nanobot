@@ -663,7 +663,7 @@ class AgentLoop:
                 # Token-aware sliding window (includes all non-history token costs)
                 fixed_tokens = self._estimate_fixed_tokens(msg.content, memory_context)
                 history, dropped = self._trim_history(full_history, fixed_tokens, 0)
-                # Compress dropped messages into a summary (injected into system prompt)
+                # Compress dropped messages into a summary (injected as user message)
                 context_summary: str | None = None
                 if dropped:
                     context_summary = await self._compress_dropped(session, dropped)
@@ -679,12 +679,14 @@ class AgentLoop:
                 )
                 final_content, _, all_msgs, tool_timings = await self._run_agent_loop(messages)
                 _posthog_final_content = final_content
-                # skip uses trimmed history length (including summary msg if injected)
-                self._save_turn(session, all_msgs, 1 + len(history), tool_timings)
+                # skip = system(1) + dynamic context msg(0 or 1) + history
+                _has_dynamic_ctx = bool(context_summary or memory_context)
+                skip = 1 + int(_has_dynamic_ctx) + len(history)
+                self._save_turn(session, all_msgs, skip, tool_timings)
                 await self.sessions.save(session, tool_traces=self._pending_traces)
                 self._pending_traces = []
                 self._maybe_generate_summary(session)
-                self._store_memory_async(user_id, all_msgs, 1 + len(history))
+                self._store_memory_async(user_id, all_msgs, skip)
                 return OutboundMessage(channel=channel, chat_id=chat_id,
                                       content=final_content or "Background task completed.")
 
@@ -735,7 +737,7 @@ class AgentLoop:
             # Token-aware sliding window (includes all non-history token costs)
             fixed_tokens = self._estimate_fixed_tokens(msg.content, memory_context)
             history, dropped = self._trim_history(full_history, fixed_tokens, 0)
-            # Compress dropped messages into a summary (injected into system prompt)
+            # Compress dropped messages into a summary (injected as user message)
             context_summary: str | None = None
             if dropped:
                 context_summary = await self._compress_dropped(session, dropped)
@@ -768,12 +770,14 @@ class AgentLoop:
                 final_content = "I've completed processing but have no response to give."
             _posthog_final_content = final_content
 
-            # skip uses trimmed history length (including summary msg if injected)
-            self._save_turn(session, all_msgs, 1 + len(history), tool_timings)
+            # skip = system(1) + dynamic context msg(0 or 1) + history
+            _has_dynamic_ctx = bool(context_summary or memory_context)
+            skip = 1 + int(_has_dynamic_ctx) + len(history)
+            self._save_turn(session, all_msgs, skip, tool_timings)
             await self.sessions.save(session, tool_traces=self._pending_traces)
             self._pending_traces = []
             self._maybe_generate_summary(session)
-            self._store_memory_async(user_id, all_msgs, 1 + len(history))
+            self._store_memory_async(user_id, all_msgs, skip)
 
             if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
                 return None
