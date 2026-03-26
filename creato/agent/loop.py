@@ -93,6 +93,7 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         summary_model: str | None = None,
         summary_api_key: str | None = None,
+        summary_provider: LLMProvider | None = None,
         memory: MemoryProvider | None = None,
         max_output_tokens: int = 8192,
     ):
@@ -105,6 +106,7 @@ class AgentLoop:
         self.model = model or provider.get_default_model()
         self._summary_model = summary_model
         self._summary_api_key = summary_api_key
+        self._summary_provider = summary_provider
         self.max_iterations = max_iterations
         self.context_window_tokens = context_window_tokens
         self.max_output_tokens = max_output_tokens
@@ -115,8 +117,7 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         self.memory = memory
         self._compressor = ContextCompressor(
-            model=summary_model or "openai/gpt-4o-mini",
-            api_key=summary_api_key,
+            provider=summary_provider or provider,
         )
 
         self.context = PromptBuilder(workspace)
@@ -1122,33 +1123,18 @@ class AgentLoop:
             if first_assistant:
                 context += f"\nAssistant: {first_assistant}"
 
-            # Use dedicated summary model (gpt-4o-mini) if configured,
+            # Use dedicated summary provider if available,
             # otherwise fall back to the main provider.
-            if self._summary_model and self._summary_api_key:
-                from litellm import acompletion
-
-                resp = await acompletion(
-                    model=self._summary_model,
-                    messages=[
-                        {"role": "system", "content": self._SUMMARY_PROMPT},
-                        {"role": "user", "content": context},
-                    ],
-                    max_tokens=50,
-                    temperature=0.7,
-                    api_key=self._summary_api_key,
-                )
-                summary = (resp.choices[0].message.content or "").strip()
-            else:
-                response = await self.provider.chat_with_retry(
-                    messages=[
-                        {"role": "system", "content": self._SUMMARY_PROMPT},
-                        {"role": "user", "content": context},
-                    ],
-                    model=self.model,
-                    max_tokens=50,
-                    temperature=0.7,
-                )
-                summary = (response.content or "").strip()
+            target = self._summary_provider or self.provider
+            response = await target.chat(
+                messages=[
+                    {"role": "system", "content": self._SUMMARY_PROMPT},
+                    {"role": "user", "content": context},
+                ],
+                max_tokens=50,
+                temperature=0.7,
+            )
+            summary = (response.content or "").strip()
 
             if summary:
                 session.summary = summary

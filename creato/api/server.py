@@ -202,8 +202,12 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     )
 
     cfg = config
-    # Resolve summary model API key from providers config
-    _summary_key = (cfg.get_provider(cfg.agents.defaults.summary_model) or cfg.providers.openai).api_key or None
+    # Create a lightweight summary provider for session titles & context compression
+    from creato.providers.router import create_provider as _create_provider
+    try:
+        _summary_provider = _create_provider(cfg, model=cfg.agents.defaults.summary_model)
+    except Exception:
+        _summary_provider = None
 
     # Initialize long-term memory if enabled
     _memory = None
@@ -236,7 +240,8 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         mcp_servers=cfg.tools.mcp_servers,
         channels_config=cfg.channels,
         summary_model=cfg.agents.defaults.summary_model,
-        summary_api_key=_summary_key,
+        summary_api_key=None,
+        summary_provider=_summary_provider,
         memory=_memory,
         max_output_tokens=cfg.agents.defaults.max_tokens,
     )

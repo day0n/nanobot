@@ -265,11 +265,7 @@ class LLMProvider(ABC):
     # Map class names to PostHog-friendly provider names
     _POSTHOG_PROVIDER_MAP: dict[str, str] = {
         "OpenAIProvider": "openai",
-        "LiteLLMProvider": "litellm",
         "VertexGeminiProvider": "google",
-        "AzureOpenAIProvider": "azure",
-        "CustomProvider": "custom",
-        "OpenAICodexProvider": "openai-codex",
     }
 
     def _posthog_capture(

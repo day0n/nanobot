@@ -334,94 +334,9 @@ def _merge_missing_defaults(existing: Any, defaults: Any) -> Any:
 
 
 def _make_provider(config: Config):
-    """Create the appropriate LLM provider from config."""
-    from creato.providers.base import GenerationSettings
-    from creato.providers.openai_codex_provider import OpenAICodexProvider
-    from creato.providers.azure_openai_provider import AzureOpenAIProvider
-
-    # Vertex AI Gemini: only when credentials are configured AND model is a Gemini model
-    vc = config.providers.vertex_gemini
-    model = config.agents.defaults.model
-    if vc.oc_json and vc.project and "gemini" in model.lower():
-        from creato.providers.vertex_gemini_provider import VertexGeminiProvider
-        return VertexGeminiProvider(
-            oc_json_b64=vc.oc_json,
-            project=vc.project,
-            location=vc.location,
-            default_model=model,
-        )
-
-    provider_name = config.get_provider_name(model)
-    p = config.get_provider(model)
-
-    # OpenAI Codex (OAuth)
-    if provider_name == "openai_codex" or model.startswith("openai-codex/"):
-        provider = OpenAICodexProvider(default_model=model)
-    # OpenAI: direct provider using openai SDK with streaming support
-    elif provider_name == "openai":
-        from creato.providers.openai_provider import OpenAIProvider
-        if not p or not p.api_key:
-            console.print("[red]Error: OpenAI requires api_key.[/red]")
-            console.print("Set it in ~/.creato/config.json under providers.openai section")
-            raise typer.Exit(1)
-        provider = OpenAIProvider(
-            api_key=p.api_key,
-            api_base=p.api_base,
-            default_model=model,
-            extra_headers=p.extra_headers if p else None,
-        )
-    # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
-    elif provider_name == "custom":
-        from creato.providers.custom_provider import CustomProvider
-        provider = CustomProvider(
-            api_key=p.api_key if p else "no-key",
-            api_base=config.get_api_base(model) or "http://localhost:8000/v1",
-            default_model=model,
-            extra_headers=p.extra_headers if p else None,
-        )
-    # Azure OpenAI: direct Azure OpenAI endpoint with deployment name
-    elif provider_name == "azure_openai":
-        if not p or not p.api_key or not p.api_base:
-            console.print("[red]Error: Azure OpenAI requires api_key and api_base.[/red]")
-            console.print("Set them in ~/.creato/config.json under providers.azure_openai section")
-            console.print("Use the model field to specify the deployment name.")
-            raise typer.Exit(1)
-        provider = AzureOpenAIProvider(
-            api_key=p.api_key,
-            api_base=p.api_base,
-            default_model=model,
-        )
-    # OpenVINO Model Server: direct OpenAI-compatible endpoint at /v3
-    elif provider_name == "ovms":
-        from creato.providers.custom_provider import CustomProvider
-        provider = CustomProvider(
-            api_key=p.api_key if p else "no-key",
-            api_base=config.get_api_base(model) or "http://localhost:8000/v3",
-            default_model=model,
-        )
-    else:
-        from creato.providers.litellm_provider import LiteLLMProvider
-        from creato.providers.registry import find_by_name
-        spec = find_by_name(provider_name)
-        if not model.startswith("bedrock/") and not (p and p.api_key) and not (spec and (spec.is_oauth or spec.is_local)):
-            console.print("[red]Error: No API key configured.[/red]")
-            console.print("Set one in ~/.creato/config.json under providers section")
-            raise typer.Exit(1)
-        provider = LiteLLMProvider(
-            api_key=p.api_key if p else None,
-            api_base=config.get_api_base(model),
-            default_model=model,
-            extra_headers=p.extra_headers if p else None,
-            provider_name=provider_name,
-        )
-
-    defaults = config.agents.defaults
-    provider.generation = GenerationSettings(
-        temperature=defaults.temperature,
-        max_tokens=defaults.max_tokens,
-        reasoning_effort=defaults.reasoning_effort,
-    )
-    return provider
+    """Create the appropriate LLM provider from config via router."""
+    from creato.providers.router import create_provider
+    return create_provider(config)
 
 
 def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
@@ -519,7 +434,13 @@ def agent(
     else:
         logger.disable("creato")
 
-    _sk = (config.get_provider(config.agents.defaults.summary_model) or config.providers.openai).api_key or None
+    # Create a lightweight summary provider for session titles & context compression
+    from creato.providers.router import create_provider as _create_provider
+    summary_model = config.agents.defaults.summary_model
+    try:
+        _summary_provider = _create_provider(config, model=summary_model)
+    except Exception:
+        _summary_provider = None  # fall back to main provider in AgentLoop
 
     # Initialize long-term memory if enabled
     _memory = None
@@ -552,7 +473,8 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         summary_model=config.agents.defaults.summary_model,
-        summary_api_key=_sk,
+        summary_api_key=None,
+        summary_provider=_summary_provider,
         memory=_memory,
         max_output_tokens=config.agents.defaults.max_tokens,
     )
@@ -721,109 +643,17 @@ def status():
     console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
 
     if config_path.exists():
-        from creato.providers.registry import PROVIDERS
-
         console.print(f"Model: {config.agents.defaults.model}")
 
-        # Check API keys from registry
-        for spec in PROVIDERS:
-            p = getattr(config.providers, spec.name, None)
-            if p is None:
-                continue
-            if spec.is_oauth:
-                console.print(f"{spec.label}: [green]✓ (OAuth)[/green]")
-            elif spec.is_local:
-                # Local deployments show api_base instead of api_key
-                if p.api_base:
-                    console.print(f"{spec.label}: [green]✓ {p.api_base}[/green]")
-                else:
-                    console.print(f"{spec.label}: [dim]not set[/dim]")
-            else:
-                has_key = bool(p.api_key)
-                console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
+        # Check provider configs
+        oai = config.providers.openai
+        console.print(f"OpenAI: {'[green]✓[/green]' if oai.api_key else '[dim]not set[/dim]'}")
+        if oai.api_base:
+            console.print(f"  api_base: {oai.api_base}")
 
-
-# ============================================================================
-# OAuth Login
-# ============================================================================
-
-provider_app = typer.Typer(help="Manage providers")
-app.add_typer(provider_app, name="provider")
-
-
-_LOGIN_HANDLERS: dict[str, callable] = {}
-
-
-def _register_login(name: str):
-    def decorator(fn):
-        _LOGIN_HANDLERS[name] = fn
-        return fn
-    return decorator
-
-
-@provider_app.command("login")
-def provider_login(
-    provider: str = typer.Argument(..., help="OAuth provider (e.g. 'openai-codex', 'github-copilot')"),
-):
-    """Authenticate with an OAuth provider."""
-    from creato.providers.registry import PROVIDERS
-
-    key = provider.replace("-", "_")
-    spec = next((s for s in PROVIDERS if s.name == key and s.is_oauth), None)
-    if not spec:
-        names = ", ".join(s.name.replace("_", "-") for s in PROVIDERS if s.is_oauth)
-        console.print(f"[red]Unknown OAuth provider: {provider}[/red]  Supported: {names}")
-        raise typer.Exit(1)
-
-    handler = _LOGIN_HANDLERS.get(spec.name)
-    if not handler:
-        console.print(f"[red]Login not implemented for {spec.label}[/red]")
-        raise typer.Exit(1)
-
-    console.print(f"{__logo__} OAuth Login - {spec.label}\n")
-    handler()
-
-
-@_register_login("openai_codex")
-def _login_openai_codex() -> None:
-    try:
-        from oauth_cli_kit import get_token, login_oauth_interactive
-        token = None
-        try:
-            token = get_token()
-        except Exception:
-            pass
-        if not (token and token.access):
-            console.print("[cyan]Starting interactive OAuth login...[/cyan]\n")
-            token = login_oauth_interactive(
-                print_fn=lambda s: console.print(s),
-                prompt_fn=lambda s: typer.prompt(s),
-            )
-        if not (token and token.access):
-            console.print("[red]✗ Authentication failed[/red]")
-            raise typer.Exit(1)
-        console.print(f"[green]✓ Authenticated with OpenAI Codex[/green]  [dim]{token.account_id}[/dim]")
-    except ImportError:
-        console.print("[red]oauth_cli_kit not installed. Run: pip install oauth-cli-kit[/red]")
-        raise typer.Exit(1)
-
-
-@_register_login("github_copilot")
-def _login_github_copilot() -> None:
-    import asyncio
-
-    console.print("[cyan]Starting GitHub Copilot device flow...[/cyan]\n")
-
-    async def _trigger():
-        from litellm import acompletion
-        await acompletion(model="github_copilot/gpt-4o", messages=[{"role": "user", "content": "hi"}], max_tokens=1)
-
-    try:
-        asyncio.run(_trigger())
-        console.print("[green]✓ Authenticated with GitHub Copilot[/green]")
-    except Exception as e:
-        console.print(f"[red]Authentication error: {e}[/red]")
-        raise typer.Exit(1)
+        vc = config.providers.vertex_gemini
+        has_vertex = bool(vc.oc_json and vc.project)
+        console.print(f"Vertex Gemini: {'[green]✓[/green]' if has_vertex else '[dim]not set[/dim]'}")
 
 
 if __name__ == "__main__":
