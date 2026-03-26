@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from creato.bus.events import InboundMessage
-from creato.bus.queue import MessageBus
 from creato.providers.base import LLMResponse
 from creato.session.manager import Session, SessionManager
 
@@ -138,7 +137,6 @@ class TestSessionRuntime:
         provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
 
         loop = AgentLoop(
-            bus=MessageBus(),
             provider=provider,
             workspace=tmp_path,
             model="test-model",

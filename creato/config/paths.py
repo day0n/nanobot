@@ -35,12 +35,6 @@ def get_workspace_path(workspace: str | None = None) -> Path:
     return ensure_dir(path)
 
 
-def get_cli_history_path() -> Path:
-    """Return the shared CLI history file path."""
-    return Path.home() / ".creato" / "history" / "cli_history"
-
-
-
 def get_legacy_sessions_dir() -> Path:
     """Return the legacy global session directory used for migration fallback."""
     return Path.home() / ".creato" / "sessions"

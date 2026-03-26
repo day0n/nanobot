@@ -25,7 +25,6 @@ from creato.agent.events import (
     agent_started,
 )
 from creato.agent.loop import AgentLoop
-from creato.bus.queue import MessageBus
 
 if TYPE_CHECKING:
     from creato.config.schema import Config
@@ -184,7 +183,6 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         if mq_connection:
             await close_rabbitmq()
         await app.state.agent.close_mcp()
-        app.state.agent.stop()
         from creato.database.mongo import mongo_client
         from creato.database.redis import redis_client as rc
         if rc:
@@ -202,6 +200,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     )
 
     cfg = config
+    app.state.config = cfg
     # Create a lightweight summary provider for session titles & context compression
     from creato.providers.router import create_provider as _create_provider
     try:
@@ -225,7 +224,6 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         )
 
     agent = AgentLoop(
-        bus=MessageBus(),
         provider=provider,
         workspace=cfg.workspace_path,
         model=cfg.agents.defaults.model,
@@ -417,3 +415,23 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         return {"status": "ok"}
 
     return app
+
+
+def build_app() -> FastAPI:
+    """Factory for uvicorn: ``uvicorn creato.api.server:build_app --factory``."""
+    import os
+    from pathlib import Path
+
+    from creato.config.loader import load_config, set_config_path
+    from creato.providers.router import create_provider
+
+    config_file = os.environ.get("CREATO_CONFIG_FILE")
+    if config_file:
+        p = Path(config_file).expanduser().resolve()
+        set_config_path(p)
+        config = load_config(p)
+    else:
+        config = load_config()
+
+    provider = create_provider(config)
+    return create_app(config, provider)

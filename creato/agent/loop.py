@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 import re
-import sys
 from contextlib import AsyncExitStack, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -53,7 +52,6 @@ from creato.agent.tools.spawn import SpawnTool
 from creato.agent.tools.opencreator import EditWorkflowTool, GetNodeSpecTool, GetWorkflowTool, GetWorkflowResultsTool, RunWorkflowTool
 from creato.agent.tools.web import WebFetchTool, WebSearchTool
 from creato.bus.events import InboundMessage, OutboundMessage
-from creato.bus.queue import MessageBus
 from creato.providers.base import LLMProvider, LLMResponse
 from creato.session.manager import Session, SessionManager
 
@@ -77,7 +75,6 @@ class AgentLoop:
 
     def __init__(
         self,
-        bus: MessageBus,
         provider: LLMProvider,
         workspace: Path,
         model: str | None = None,
@@ -99,7 +96,6 @@ class AgentLoop:
     ):
         from creato.config.schema import ApiServerConfig, ExecToolConfig, WebSearchConfig
 
-        self.bus = bus
         self.channels_config = channels_config
         self.provider = provider
         self.workspace = workspace
@@ -128,7 +124,7 @@ class AgentLoop:
         self.subagents = SubagentManager(
             provider=provider,
             workspace=workspace,
-            bus=bus,
+            on_result=self._handle_subagent_result,
             model=self.model,
             web_search_config=self.web_search_config,
             web_proxy=web_proxy,
@@ -136,12 +132,10 @@ class AgentLoop:
             restrict_to_workspace=restrict_to_workspace,
         )
 
-        self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
-        self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._background_tasks: list[asyncio.Task] = []
         self._session_locks: dict[str, asyncio.Lock] = {}
         # CREATO_MAX_CONCURRENT_REQUESTS: <=0 means unlimited; default 3.
@@ -174,8 +168,6 @@ class AgentLoop:
         # ))
         self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
-        # Disabled for chatbot-only rollout: replies return through the normal outbound path.
-        # self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
         self.tools.register(GetWorkflowTool(api_base=self.api_config.internal_api_base))
         self.tools.register(GetWorkflowResultsTool(api_base=self.api_config.internal_api_base))
@@ -192,12 +184,15 @@ class AgentLoop:
         # Disabled for the restricted chatbot rollout: do not register dynamic MCP tools.
         return
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None, session_key: str | None = None) -> None:
         """Update context for all tools that need routing info."""
         for name in ("message", "spawn"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else [])) # type: ignore
+                    if name == "spawn":
+                        tool.set_context(channel, chat_id, session_key=session_key)
+                    elif name == "message":
+                        tool.set_context(channel, chat_id, *([message_id] if message_id else []))
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -506,90 +501,25 @@ class AgentLoop:
 
         return final_content, tools_used, messages, tool_timings
 
-    async def run(self) -> None:
-        """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
-        self._running = True
-        await self._connect_mcp()
-        logger.info("Agent loop started")
+    async def _locked_process(self, msg: InboundMessage, *, session_key: str | None = None, **kwargs) -> OutboundMessage | None:
+        """Process a message with per-session lock + global concurrency gate.
 
-        while self._running:
-            try:
-                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-            except asyncio.CancelledError:
-                # Preserve real task cancellation so shutdown can complete cleanly.
-                # Only ignore non-task CancelledError signals that may leak from integrations.
-                if not self._running or asyncio.current_task().cancelling():
-                    raise
-                continue
-            except Exception as e:
-                logger.warning("Error consuming inbound message: {}, continuing...", e)
-                continue
-
-            cmd = msg.content.strip().lower()
-            if cmd == "/stop":
-                await self._handle_stop(msg)
-            elif cmd == "/restart":
-                await self._handle_restart(msg)
-            else:
-                task = asyncio.create_task(self._dispatch(msg))
-                self._active_tasks.setdefault(msg.session_key, []).append(task)
-                task.add_done_callback(lambda t, k=msg.session_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
-
-    async def _handle_stop(self, msg: InboundMessage) -> None:
-        """Cancel all active tasks and subagents for the session."""
-        tasks = self._active_tasks.pop(msg.session_key, [])
-        cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
-        for t in tasks:
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):
-                pass
-        sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
-        total = cancelled + sub_cancelled
-        content = f"Stopped {total} task(s)." if total else "No active task to stop."
-        await self.bus.publish_outbound(OutboundMessage(
-            channel=msg.channel, chat_id=msg.chat_id, content=content,
-        ))
-
-    async def _handle_restart(self, msg: InboundMessage) -> None:
-        """Restart the process in-place via os.execv."""
-        await self.bus.publish_outbound(OutboundMessage(
-            channel=msg.channel, chat_id=msg.chat_id, content="Restarting...",
-        ))
-
-        async def _do_restart():
-            await asyncio.sleep(1)
-            # Use -m creato instead of sys.argv[0] for Windows compatibility
-            # (sys.argv[0] may be just "creato" without full path on Windows)
-            os.execv(sys.executable, [sys.executable, "-m", "creato"] + sys.argv[1:])
-
-        asyncio.create_task(_do_restart())
-
-    async def _dispatch(self, msg: InboundMessage) -> None:
-        """Process a message: per-session serial, cross-session concurrent."""
-        lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
+        Args:
+            session_key: The real session key to lock on. Falls back to msg.session_key
+                         if not provided (e.g. subagent results that carry the real key
+                         in their chat_id).
+        """
+        key = session_key or msg.session_key
+        lock = self._session_locks.setdefault(key, asyncio.Lock())
         gate = self._concurrency_gate or nullcontext()
         async with lock, gate:
-            try:
-                response = await self._process_message(msg)
-                if response is not None:
-                    await self.bus.publish_outbound(response)
-                elif msg.channel == "cli":
-                    await self.bus.publish_outbound(OutboundMessage(
-                        channel=msg.channel, chat_id=msg.chat_id,
-                        content="", metadata=msg.metadata or {},
-                    ))
-            except asyncio.CancelledError:
-                logger.info("Task cancelled for session {}", msg.session_key)
-                raise
-            except Exception:
-                logger.exception("Error processing message for session {}", msg.session_key)
-                await self.bus.publish_outbound(OutboundMessage(
-                    channel=msg.channel, chat_id=msg.chat_id,
-                    content="Sorry, I encountered an error.",
-                ))
+            return await self._process_message(msg, session_key=key, **kwargs)
+
+    async def _handle_subagent_result(self, msg: InboundMessage) -> None:
+        """Process subagent result with proper session locking."""
+        response = await self._locked_process(msg)
+        if response:
+            logger.info("Subagent result processed: {}", response.content[:120])
 
     async def close_mcp(self) -> None:
         """Drain pending background archives, then close MCP connections."""
@@ -608,11 +538,6 @@ class AgentLoop:
         task = asyncio.create_task(coro)
         self._background_tasks.append(task)
         task.add_done_callback(self._background_tasks.remove)
-
-    def stop(self) -> None:
-        """Stop the agent loop."""
-        self._running = False
-        logger.info("Agent loop stopping")
 
     async def _process_message(
         self,
@@ -653,11 +578,13 @@ class AgentLoop:
                 channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
                                     else ("cli", msg.chat_id))
                 logger.info("Processing system message from {}", msg.sender_id)
-                key = f"{channel}:{chat_id}"
+                # Use the real session_key (from session_key_override) if available,
+                # otherwise fall back to the parsed channel:chat_id.
+                key = session_key or msg.session_key
                 session = await self.sessions.get_or_create(
                     key, user_id=user_id, workflow_id=workflow_id, channel=channel,
                 )
-                self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+                self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"), session_key=key)
                 full_history = session.get_history(max_messages=0)
                 # Retrieve long-term memory before budget calculation so its size is included
                 memory_context = await self._retrieve_memory(user_id, msg.content)
@@ -719,15 +646,13 @@ class AgentLoop:
                 lines = [
                     "🐈 creato commands:",
                     "/new — Start a new conversation",
-                    "/stop — Stop the current task",
-                    "/restart — Restart the bot",
                     "/help — Show available commands",
                 ]
                 return OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
                 )
 
-            self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+            self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), session_key=key)
             if message_tool := self.tools.get("message"):
                 if isinstance(message_tool, MessageTool):
                     message_tool.start_turn()
@@ -752,19 +677,8 @@ class AgentLoop:
                 context_summary=context_summary,
             )
 
-            async def _bus_progress(event: AgentEvent) -> None:
-                meta = dict(msg.metadata or {})
-                meta["_progress"] = True
-                content = event.data.get("content", "")
-                if event.event == "tool.started":
-                    meta["_tool_hint"] = True
-                    content = event.data.get("tool_name", "")
-                await self.bus.publish_outbound(OutboundMessage(
-                    channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
-                ))
-
             final_content, _, all_msgs, tool_timings = await self._run_agent_loop(
-                initial_messages, on_progress=on_progress or _bus_progress,
+                initial_messages, on_progress=on_progress,
             )
 
             if final_content is None:
@@ -1146,8 +1060,8 @@ class AgentLoop:
     async def process_direct(
         self,
         content: str,
-        session_key: str = "cli:direct",
-        channel: str = "cli",
+        session_key: str = "api:direct",
+        channel: str = "api",
         chat_id: str = "direct",
         on_progress: Callable[[AgentEvent], Awaitable[None]] | None = None,
         metadata: dict[str, Any] | None = None,
@@ -1155,28 +1069,25 @@ class AgentLoop:
         user_id: str = "",
         workflow_id: str | None = None,
     ) -> str:
-        """Process a message directly (for API/SSE or CLI usage).
+        """Process a message directly (for API/SSE usage).
 
         Uses per-session lock so different users run concurrently while
         messages within the same session remain serialised.
         """
         await self._connect_mcp()
-        lock = self._session_locks.setdefault(session_key, asyncio.Lock())
-        gate = self._concurrency_gate or nullcontext()
-        async with lock, gate:
-            msg = InboundMessage(
-                channel=channel,
-                sender_id="user",
-                chat_id=chat_id,
-                content=content,
-                metadata=metadata or {},
-            )
-            response = await self._process_message(
-                msg,
-                session_key=session_key,
-                on_progress=on_progress,
-                private_context=private_context,
-                user_id=user_id,
-                workflow_id=workflow_id,
-            )
-            return response.content if response else ""
+        msg = InboundMessage(
+            channel=channel,
+            sender_id="user",
+            chat_id=chat_id,
+            content=content,
+            metadata=metadata or {},
+        )
+        response = await self._locked_process(
+            msg,
+            session_key=session_key,
+            on_progress=on_progress,
+            private_context=private_context,
+            user_id=user_id,
+            workflow_id=workflow_id,
+        )
+        return response.content if response else ""

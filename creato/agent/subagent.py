@@ -4,7 +4,7 @@ import asyncio
 import json
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -14,7 +14,6 @@ from creato.agent.tools.registry import ToolRegistry
 from creato.agent.tools.shell import ExecTool
 from creato.agent.tools.web import WebFetchTool, WebSearchTool
 from creato.bus.events import InboundMessage
-from creato.bus.queue import MessageBus
 from creato.config.schema import ExecToolConfig
 from creato.providers.base import LLMProvider
 from creato.utils.helpers import build_assistant_message
@@ -27,7 +26,7 @@ class SubagentManager:
         self,
         provider: LLMProvider,
         workspace: Path,
-        bus: MessageBus,
+        on_result: "Callable[[InboundMessage], Awaitable[None]] | None" = None,
         model: str | None = None,
         web_search_config: "WebSearchConfig | None" = None,
         web_proxy: str | None = None,
@@ -38,7 +37,7 @@ class SubagentManager:
 
         self.provider = provider
         self.workspace = workspace
-        self.bus = bus
+        self._on_result = on_result
         self.model = model or provider.get_default_model()
         self.web_search_config = web_search_config or WebSearchConfig()
         self.web_proxy = web_proxy
@@ -58,7 +57,7 @@ class SubagentManager:
         """Spawn a subagent to execute a task in the background."""
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
-        origin = {"channel": origin_channel, "chat_id": origin_chat_id}
+        origin = {"channel": origin_channel, "chat_id": origin_chat_id, "session_key": session_key}
 
         bg_task = asyncio.create_task(
             self._run_subagent(task_id, task, display_label, origin)
@@ -176,7 +175,7 @@ class SubagentManager:
         origin: dict[str, str],
         status: str,
     ) -> None:
-        """Announce the subagent result to the main agent via the message bus."""
+        """Announce the subagent result to the main agent via callback."""
         status_text = "completed successfully" if status == "ok" else "failed"
 
         announce_content = f"""[Subagent '{label}' {status_text}]
@@ -188,15 +187,18 @@ Result:
 
 Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
 
-        # Inject as system message to trigger main agent
         msg = InboundMessage(
             channel="system",
             sender_id="subagent",
             chat_id=f"{origin['channel']}:{origin['chat_id']}",
             content=announce_content,
+            session_key_override=origin.get("session_key"),
         )
 
-        await self.bus.publish_inbound(msg)
+        if self._on_result:
+            await self._on_result(msg)
+        else:
+            logger.warning("Subagent [{}] result dropped: no result handler", task_id)
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
     
     def _build_subagent_prompt(self) -> str:

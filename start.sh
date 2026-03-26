@@ -28,12 +28,13 @@ PID=$(lsof -ti tcp:"$PORT" 2>/dev/null || true)
 if [ -n "$PID" ]; then
     kill "$PID" && sleep 1 && echo "  已终止 PID $PID"
 else
-    pkill -f "creato serve" 2>/dev/null && sleep 1 && echo "  已终止旧进程" || echo "  无旧进程"
+    pkill -f "python -m creato" 2>/dev/null && sleep 1 && echo "  已终止旧进程" || echo "  无旧进程"
 fi
 
 echo "[4/4] 启动 creato (port $PORT, log: $LOG_FILE)..."
 echo "  以前台模式启动，日志将同时输出到终端和 $LOG_FILE"
 echo "  按 Ctrl+C 可停止服务"
 
-env PYTHONPATH="$SCRIPT_DIR" "$SCRIPT_DIR/.venv/bin/creato" serve --port "$PORT" \
+env PYTHONPATH="$SCRIPT_DIR" CREATO_API__PORT="$PORT" \
+    "$SCRIPT_DIR/.venv/bin/python" -m creato \
     2>&1 | tee "$LOG_FILE"

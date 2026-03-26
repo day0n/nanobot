@@ -1,7 +1,6 @@
 from pathlib import Path
 
 from creato.config.paths import (
-    get_cli_history_path,
     get_data_dir,
     get_legacy_sessions_dir,
     get_logs_dir,
@@ -28,8 +27,7 @@ def test_media_dir_supports_channel_namespace(monkeypatch, tmp_path: Path) -> No
     assert get_media_dir("telegram") == config_file.parent / "media" / "telegram"
 
 
-def test_shared_and_legacy_paths_remain_global() -> None:
-    assert get_cli_history_path() == Path.home() / ".creato" / "history" / "cli_history"
+def test_legacy_sessions_path_remains_global() -> None:
     assert get_legacy_sessions_dir() == Path.home() / ".creato" / "sessions"
 
 

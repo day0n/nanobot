@@ -8,15 +8,13 @@ import pytest
 from creato.agent.loop import AgentLoop
 from creato.agent.tools.message import MessageTool
 from creato.bus.events import InboundMessage, OutboundMessage
-from creato.bus.queue import MessageBus
 from creato.providers.base import LLMResponse, ToolCallRequest
 
 
 def _make_loop(tmp_path: Path) -> AgentLoop:
-    bus = MessageBus()
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
-    return AgentLoop(bus=bus, provider=provider, workspace=tmp_path, model="test-model")
+    return AgentLoop(provider=provider, workspace=tmp_path, model="test-model")
 
 
 class TestMessageToolSuppressLogic:

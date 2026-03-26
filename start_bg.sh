@@ -8,7 +8,6 @@ RUN_DIR="${CREATO_RUN_DIR:-$HOME/.creato/run}"
 LOG_FILE="${CREATO_LOG_FILE:-$LOG_DIR/creato-${PORT}.log}"
 PID_FILE="${CREATO_PID_FILE:-$RUN_DIR/creato-${PORT}.pid}"
 ENV_FILE="${CREATO_ENV_FILE:-$SCRIPT_DIR/.env.local}"
-CREATO_BIN="${CREATO_BIN:-$SCRIPT_DIR/.venv/bin/creato}"
 
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 cd "$SCRIPT_DIR"
@@ -19,12 +18,6 @@ if [ -f "$ENV_FILE" ]; then
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     set +a
-fi
-
-if [ ! -x "$CREATO_BIN" ]; then
-    echo "creato 可执行文件不存在: $CREATO_BIN" >&2
-    echo "请先创建虚拟环境并安装依赖，或通过 CREATO_BIN 指定可执行文件。" >&2
-    exit 1
 fi
 
 echo "[1/4] 检查现有 PID 文件..."
@@ -48,7 +41,8 @@ if [ -n "$PORT_PID" ]; then
 fi
 
 echo "[3/4] 后台启动 creato..."
-nohup env PYTHONPATH="$SCRIPT_DIR" "$CREATO_BIN" serve --port "$PORT" \
+nohup env PYTHONPATH="$SCRIPT_DIR" CREATO_API__PORT="$PORT" \
+    "$SCRIPT_DIR/.venv/bin/python" -m creato \
     >>"$LOG_FILE" 2>&1 &
 PID=$!
 echo "$PID" > "$PID_FILE"
