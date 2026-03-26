@@ -262,6 +262,16 @@ class LLMProvider(ABC):
                 result.append(msg)
         return result if found else None
 
+    # Map class names to PostHog-friendly provider names
+    _POSTHOG_PROVIDER_MAP: dict[str, str] = {
+        "OpenAIProvider": "openai",
+        "LiteLLMProvider": "litellm",
+        "VertexGeminiProvider": "google",
+        "AzureOpenAIProvider": "azure",
+        "CustomProvider": "custom",
+        "OpenAICodexProvider": "openai-codex",
+    }
+
     def _posthog_capture(
         self,
         *,
@@ -285,7 +295,7 @@ class LLMProvider(ABC):
             ] if response.tool_calls else None
             capture_generation(
                 model=resolved_model,
-                provider=self.__class__.__name__,
+                provider=self._POSTHOG_PROVIDER_MAP.get(self.__class__.__name__, self.__class__.__name__.lower()),
                 messages=messages,
                 output_content=response.content,
                 output_tool_calls=tc_dicts,
@@ -524,7 +534,7 @@ class LLMProvider(ABC):
                 from creato.posthog import capture_generation
                 capture_generation(
                     model=resolved_model,
-                    provider=provider_name,
+                    provider=self._POSTHOG_PROVIDER_MAP.get(provider_name, provider_name.lower()),
                     messages=messages,
                     output_content="".join(_ph_content_parts) or None,
                     output_tool_calls=_ph_tool_calls or None,

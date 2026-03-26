@@ -283,8 +283,9 @@ def capture_trace(
     if error:
         properties["$ai_error"] = error[:2000]
 
+    # Only merge non-internal properties (skip token_breakdown_* which are generation-specific)
     if ctx.properties:
-        properties.update(ctx.properties)
+        properties.update({k: v for k, v in ctx.properties.items() if not k.startswith("token_breakdown_")})
 
     try:
         _client.capture(
@@ -340,8 +341,9 @@ def capture_span(
     if error:
         properties["$ai_error"] = error[:2000]
 
+    # Only merge non-internal properties (skip token_breakdown_* which are generation-specific)
     if ctx.properties:
-        properties.update(ctx.properties)
+        properties.update({k: v for k, v in ctx.properties.items() if not k.startswith("token_breakdown_")})
 
     try:
         _client.capture(
@@ -380,9 +382,20 @@ def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if msg.get("tool_call_id"):
             clean["tool_call_id"] = msg["tool_call_id"]
 
-        # Preserve assistant tool_calls
+        # Preserve assistant tool_calls (truncate large arguments)
         if msg.get("tool_calls"):
-            clean["tool_calls"] = msg["tool_calls"]
+            clean["tool_calls"] = [
+                {
+                    **tc,
+                    "function": {
+                        **tc.get("function", {}),
+                        "arguments": tc.get("function", {}).get("arguments", "")[:4000]
+                        if isinstance(tc.get("function", {}).get("arguments"), str)
+                        else tc.get("function", {}).get("arguments", ""),
+                    },
+                }
+                for tc in msg["tool_calls"]
+            ]
 
         content = msg.get("content")
         if isinstance(content, str):
