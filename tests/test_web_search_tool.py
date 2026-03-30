@@ -3,7 +3,7 @@
 import httpx
 import pytest
 
-from creato.agent.tools.web import WebSearchTool
+from creato.core.tools.web import WebSearchTool
 from creato.config.schema import WebSearchConfig
 
 
@@ -73,8 +73,8 @@ async def test_duckduckgo_search(monkeypatch):
         def text(self, query, max_results=5):
             return [{"title": "DDG Result", "href": "https://ddg.example", "body": "From DuckDuckGo"}]
 
-    monkeypatch.setattr("creato.agent.tools.web.DDGS", MockDDGS, raising=False)
-    import creato.agent.tools.web as web_mod
+    monkeypatch.setattr("creato.core.tools.web.DDGS", MockDDGS, raising=False)
+    import creato.core.tools.web as web_mod
     monkeypatch.setattr(web_mod, "DDGS", MockDDGS, raising=False)
 
     from ddgs import DDGS

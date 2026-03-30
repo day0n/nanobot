@@ -1,5 +1,5 @@
-from creato.agent.prompt.runtime import RUNTIME_CONTEXT_TAG
-from creato.agent.loop import AgentLoop
+from creato.core.prompt.runtime import RUNTIME_CONTEXT_TAG
+from creato.core.loop import AgentLoop
 from creato.session.manager import Session
 
 

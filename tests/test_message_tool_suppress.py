@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from creato.agent.loop import AgentLoop
-from creato.agent.tools.message import MessageTool
+from creato.core.loop import AgentLoop
+from creato.core.tools.message import MessageTool
 from creato.bus.events import InboundMessage, OutboundMessage
 from creato.providers.base import LLMResponse, ToolCallRequest
 

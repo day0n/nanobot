@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from creato.agent.memory import MemoryStore
+from creato.core.memory import MemoryStore
 from creato.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 

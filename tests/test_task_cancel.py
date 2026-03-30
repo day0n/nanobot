@@ -1,4 +1,4 @@
-"""Tests for subagent cancellation and reasoning field preservation."""
+"""Tests for SubagentTool — depth limiting, context propagation, error handling."""
 
 from __future__ import annotations
 
@@ -7,80 +7,119 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from creato.core.profile import AgentContext, AgentProfile, ProfileRegistry
+from creato.core.factory import _MAX_DEPTH
+from creato.core.tools.subagent import SubagentTool
+from creato.core.tools.registry import ToolRegistry
 
-class TestSubagentCancellation:
+
+def _make_registry() -> ProfileRegistry:
+    registry = ProfileRegistry()
+    registry.register(AgentProfile(
+        name="researcher",
+        description="test researcher",
+        system_prompt="You are a test subagent.",
+        tool_factories=(),
+        max_iterations=2,
+    ))
+    return registry
+
+
+def _make_factory(tmp_path):
+    """Create a mock AgentFactory."""
+    factory = MagicMock()
+    factory.context = AgentContext(
+        workspace=tmp_path,
+        web_search_config=MagicMock(),
+        web_proxy=None,
+        api_config=MagicMock(),
+        exec_config=MagicMock(),
+        restrict_to_workspace=False,
+    )
+    return factory
+
+
+class TestSubagentToolDepth:
     @pytest.mark.asyncio
-    async def test_cancel_by_session(self):
-        from creato.agent.subagent import SubagentManager
-
-        provider = MagicMock()
-        provider.get_default_model.return_value = "test-model"
-        mgr = SubagentManager(provider=provider, workspace=MagicMock())
-
-        cancelled = asyncio.Event()
-
-        async def slow():
-            try:
-                await asyncio.sleep(60)
-            except asyncio.CancelledError:
-                cancelled.set()
-                raise
-
-        task = asyncio.create_task(slow())
-        await asyncio.sleep(0)
-        mgr._running_tasks["sub-1"] = task
-        mgr._session_tasks["test:c1"] = {"sub-1"}
-
-        count = await mgr.cancel_by_session("test:c1")
-        assert count == 1
-        assert cancelled.is_set()
+    async def test_depth_limit_returns_error(self, tmp_path):
+        tool = SubagentTool(
+            factory=_make_factory(tmp_path),
+            profile_registry=_make_registry(),
+            provider=MagicMock(),
+            parent_model="test-model",
+            depth=_MAX_DEPTH,
+        )
+        result = await tool.execute(task="do something", agent_type="researcher")
+        assert "Maximum subagent depth" in result
 
     @pytest.mark.asyncio
-    async def test_cancel_by_session_no_tasks(self):
-        from creato.agent.subagent import SubagentManager
+    async def test_unknown_type_returns_error(self, tmp_path):
+        tool = SubagentTool(
+            factory=_make_factory(tmp_path),
+            profile_registry=_make_registry(),
+            provider=MagicMock(),
+            parent_model="test-model",
+        )
+        result = await tool.execute(task="do something", agent_type="nonexistent")
+        assert "Unknown agent type" in result
 
-        provider = MagicMock()
-        provider.get_default_model.return_value = "test-model"
-        mgr = SubagentManager(provider=provider, workspace=MagicMock())
-        assert await mgr.cancel_by_session("nonexistent") == 0
+
+class TestSubagentToolExecution:
+    @pytest.mark.asyncio
+    async def test_successful_execution(self, tmp_path):
+        from creato.core.executor import ExecutorResult
+
+        mock_result = ExecutorResult(
+            content="research complete",
+            tools_used=["web_search"],
+            messages=[],
+            tool_timings={},
+            iterations=2,
+        )
+
+        factory = _make_factory(tmp_path)
+        mock_instance = MagicMock()
+        mock_instance.tools = ToolRegistry()
+        mock_instance.system_prompt = "test prompt"
+        mock_instance.model = "test-model"
+        mock_instance.max_iterations = 2
+        factory.build.return_value = mock_instance
+
+        with patch("creato.core.tools.subagent.AgentExecutor") as MockExecutor:
+            MockExecutor.return_value.run = AsyncMock(return_value=mock_result)
+
+            tool = SubagentTool(
+                factory=factory,
+                profile_registry=_make_registry(),
+                provider=MagicMock(),
+                parent_model="test-model",
+            )
+            result = await tool.execute(task="find info", agent_type="researcher")
+
+        assert "research complete" in result
+        assert "subagent:researcher" in result
+        assert "2 iterations" in result
 
     @pytest.mark.asyncio
-    async def test_subagent_preserves_reasoning_fields_in_tool_turn(self, monkeypatch, tmp_path):
-        from creato.agent.subagent import SubagentManager
-        from creato.providers.base import LLMResponse, ToolCallRequest
+    async def test_exception_returns_error(self, tmp_path):
+        factory = _make_factory(tmp_path)
+        mock_instance = MagicMock()
+        mock_instance.tools = ToolRegistry()
+        mock_instance.system_prompt = "test prompt"
+        mock_instance.model = "test-model"
+        mock_instance.max_iterations = 2
+        factory.build.return_value = mock_instance
 
-        provider = MagicMock()
-        provider.get_default_model.return_value = "test-model"
+        with patch("creato.core.tools.subagent.AgentExecutor") as MockExecutor:
+            MockExecutor.return_value.run = AsyncMock(side_effect=RuntimeError("boom"))
 
-        captured_second_call: list[dict] = []
+            tool = SubagentTool(
+                factory=factory,
+                profile_registry=_make_registry(),
+                provider=MagicMock(),
+                parent_model="test-model",
+            )
+            result = await tool.execute(task="fail", agent_type="researcher")
 
-        call_count = {"n": 0}
-
-        async def scripted_chat_with_retry(*, messages, **kwargs):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                return LLMResponse(
-                    content="thinking",
-                    tool_calls=[ToolCallRequest(id="call_1", name="list_dir", arguments={})],
-                    reasoning_content="hidden reasoning",
-                    thinking_blocks=[{"type": "thinking", "thinking": "step"}],
-                )
-            captured_second_call[:] = messages
-            return LLMResponse(content="done", tool_calls=[])
-        provider.chat_with_retry = scripted_chat_with_retry
-        mgr = SubagentManager(provider=provider, workspace=tmp_path)
-
-        async def fake_execute(self, name, arguments):
-            return "tool result"
-
-        monkeypatch.setattr("creato.agent.tools.registry.ToolRegistry.execute", fake_execute)
-
-        await mgr._run_subagent("sub-1", "do task", "label", {"channel": "test", "chat_id": "c1"})
-
-        assistant_messages = [
-            msg for msg in captured_second_call
-            if msg.get("role") == "assistant" and msg.get("tool_calls")
-        ]
-        assert len(assistant_messages) == 1
-        assert assistant_messages[0]["reasoning_content"] == "hidden reasoning"
-        assert assistant_messages[0]["thinking_blocks"] == [{"type": "thinking", "thinking": "step"}]
+        assert "Error" in result
+        assert "boom" in result

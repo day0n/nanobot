@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
 
-from creato.agent.events import (
+from creato.core.events import (
     AgentEvent,
     AgentResponse,
     ResponseAccumulator,
@@ -24,7 +24,11 @@ from creato.agent.events import (
     agent_heartbeat,
     agent_started,
 )
-from creato.agent.loop import AgentLoop
+from creato.core.loop import AgentLoop
+from creato.core.profile import AgentContext
+from creato.core.factory import AgentFactory
+from creato.core.skills import SkillsLoader
+from creato.agents import discover_profiles
 
 if TYPE_CHECKING:
     from creato.config.schema import Config
@@ -152,6 +156,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                 password=cfg.rabbitmq.password,
                 ssl=cfg.rabbitmq.ssl,
                 prefetch_count=cfg.rabbitmq.prefetch_count,
+                virtualhost=cfg.rabbitmq.virtualhost,
             )
 
             # Create WorkflowEngine and bind to app.state
@@ -167,7 +172,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             set_dispatch_fn(event_dispatch)
 
             # Register RunWorkflowTool into the agent's tool registry
-            from creato.agent.tools.opencreator import ContinueWorkflowTool, RunWorkflowTool
+            from creato.core.tools.opencreator import ContinueWorkflowTool, RunWorkflowTool
             app.state.agent.tools.register(RunWorkflowTool(
                 api_base=cfg.api.internal_api_base,
                 workflow_engine=app.state.workflow_engine,
@@ -175,7 +180,16 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             app.state.agent.tools.register(ContinueWorkflowTool(
                 workflow_engine=app.state.workflow_engine,
             ))
-            app.state.agent._sync_tool_names()  # update prompt after dynamic tool registration
+            # Tool definitions are passed to the LLM on each call, so the model
+            # discovers new tools automatically. But the system prompt also lists
+            # tool names explicitly, so rebuild it with the updated registry.
+            from creato.agents.main.prompt import build_main_system_prompt
+            _allowed = list(main_profile.inline_skills) + list(main_profile.loadable_skills)
+            _filtered = skills_loader.filtered(_allowed)
+            app.state.agent.context._system_prompt_override = build_main_system_prompt(
+                skills_loader=_filtered,
+                tool_names=app.state.agent.tools.tool_names,
+            )
 
             logger.info(f"Workflow engine ready, reply_queue={get_reply_queue_name()}")
 
@@ -214,7 +228,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     # Initialize long-term memory if enabled
     _memory = None
     if cfg.memory.enabled:
-        from creato.agent.memory.mem0_memory import Mem0Memory
+        from creato.core.memory.mem0_memory import Mem0Memory
         _openai_key = cfg.providers.openai.api_key or None
         _memory = Mem0Memory(
             mongo_uri=cfg.mongodb.uri,
@@ -226,9 +240,34 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             openai_api_key=_openai_key,
         )
 
+    # Build Profile/Factory/Executor architecture
+    profile_registry = discover_profiles()
+    main_profile = profile_registry.get("main")
+    if not main_profile:
+        raise RuntimeError("Main agent profile not found — check creato/agents/main/")
+
+    agent_context = AgentContext(
+        workspace=cfg.workspace_path,
+        web_search_config=cfg.tools.web.search,
+        web_proxy=cfg.tools.web.proxy or None,
+        api_config=cfg.api,
+        exec_config=cfg.tools.exec,
+        restrict_to_workspace=cfg.tools.restrict_to_workspace,
+    )
+    skills_loader = SkillsLoader()
+    agent_factory = AgentFactory(
+        context=agent_context,
+        skills_loader=skills_loader,
+        provider=provider,
+        default_model=cfg.agents.defaults.model,
+        profile_registry=profile_registry,
+    )
+
     agent = AgentLoop(
         provider=provider,
         workspace=cfg.workspace_path,
+        profile=main_profile,
+        factory=agent_factory,
         model=cfg.agents.defaults.model,
         max_iterations=cfg.agents.defaults.max_tool_iterations,
         context_window_tokens=cfg.agents.defaults.context_window_tokens,

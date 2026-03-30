@@ -6,8 +6,8 @@ from datetime import datetime as real_datetime
 from pathlib import Path
 import datetime as datetime_module
 
-from creato.agent.prompt import PromptBuilder
-from creato.agent.prompt.runtime import RUNTIME_CONTEXT_TAG
+from creato.core.prompt import PromptBuilder
+from creato.core.prompt.runtime import RUNTIME_CONTEXT_TAG
 
 
 class _FakeDatetime(real_datetime):

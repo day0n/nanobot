@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from creato.agent.tools.web import WebFetchTool
+from creato.core.tools.web import WebFetchTool
 
 
 def _fake_resolve_private(hostname, port, family=0, type_=0):

@@ -53,6 +53,7 @@ async def start_mq_consumer(
     password: str,
     ssl: bool = True,
     prefetch_count: int = 1000,
+    virtualhost: str = "/",
 ) -> aio_pika.RobustConnection:
     """Connect to RabbitMQ, declare reply queue, start worker tasks."""
     global _mq_connection
@@ -63,6 +64,7 @@ async def start_mq_consumer(
         login=username,
         password=password,
         ssl=ssl,
+        virtualhost=virtualhost,
     )
     channel = await _mq_connection.channel()
     await channel.set_qos(prefetch_count=prefetch_count)

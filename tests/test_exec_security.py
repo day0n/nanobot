@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from creato.agent.tools.shell import ExecTool
+from creato.core.tools.shell import ExecTool
 
 
 def _fake_resolve_private(hostname, port, family=0, type_=0):

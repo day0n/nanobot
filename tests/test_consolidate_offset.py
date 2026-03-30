@@ -129,7 +129,7 @@ class TestSessionRuntime:
 
     @staticmethod
     def _make_loop(tmp_path: Path):
-        from creato.agent.loop import AgentLoop
+        from creato.core.loop import AgentLoop
 
         provider = MagicMock()
         provider.get_default_model.return_value = "test-model"

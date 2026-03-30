@@ -148,6 +148,7 @@ class RabbitMQConfig(Base):
     ssl: bool = True  # AWS MQ requires SSL
     num_workers: int = 3  # MD5 hash routing workers for message ordering
     prefetch_count: int = 1000
+    virtualhost: str = "/"
 
 
 class SentryConfig(Base):

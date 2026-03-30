@@ -7,8 +7,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from creato.agent.tools.mcp import MCPToolWrapper, connect_mcp_servers
-from creato.agent.tools.registry import ToolRegistry
+from creato.core.tools.mcp import MCPToolWrapper, connect_mcp_servers
+from creato.core.tools.registry import ToolRegistry
 from creato.config.schema import MCPServerConfig
 
 
@@ -325,7 +325,7 @@ async def test_connect_mcp_servers_enabled_tools_warns_on_unknown_entries(
     def _warning(message: str, *args: object) -> None:
         warnings.append(message.format(*args))
 
-    monkeypatch.setattr("creato.agent.tools.mcp.logger.warning", _warning)
+    monkeypatch.setattr("creato.core.tools.mcp.logger.warning", _warning)
 
     stack = AsyncExitStack()
     await stack.__aenter__()

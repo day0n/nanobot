@@ -1,6 +1,6 @@
 import pytest
 
-from creato.agent.tools.message import MessageTool
+from creato.core.tools.message import MessageTool
 
 
 @pytest.mark.asyncio
