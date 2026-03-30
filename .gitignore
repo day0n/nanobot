@@ -3,6 +3,7 @@
 .docs
 .env
 .env.local
+config.json
 *.pyc
 dist/
 build/
