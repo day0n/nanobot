@@ -31,12 +31,19 @@ agent_tool_traces_col = None   # agent_tool_traces — tool execution traces
 # Workflow execution collection (shared with publisher/consumer)
 flow_task_col = None           # flow_task — workflow execution task records
 
+# Workflow data collections (shared with publisher/consumer)
+flow_col = None                # flow — 工作流主表（nodes, edges）
+flow_details_col = None        # flow_details — 工作流详情（project_name）
+flow_version_col = None        # flow_version — 版本历史快照
+results_col = None             # results — 节点执行结果
+
 
 def init_mongo(uri: str, db_name: str, agent_db_name: str = "opencreator_agent") -> None:
     """Create the Motor client and bind collections for both databases."""
     global mongo_client, db, agent_sessions_collection, agent_session_messages_collection
     global agent_db, agent_sessions_col, agent_messages_col, agent_tool_traces_col
     global flow_task_col
+    global flow_col, flow_details_col, flow_version_col, results_col
 
     mongo_client = AsyncIOMotorClient(uri, server_api=ServerApi("1"))
 
@@ -53,6 +60,12 @@ def init_mongo(uri: str, db_name: str, agent_db_name: str = "opencreator_agent")
 
     # Workflow execution (shared main database)
     flow_task_col = db["flow_task"]
+
+    # Workflow data (shared main database)
+    flow_col = db["flow"]
+    flow_details_col = db["flow_details"]
+    flow_version_col = db["flow_version"]
+    results_col = db["results"]
 
 
 async def test_mongo() -> None:

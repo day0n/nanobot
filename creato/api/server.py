@@ -125,8 +125,21 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
     init_mongo(config.mongodb.uri, config.mongodb.db, config.mongodb.agent_db)
     init_redis(config.redis.host, config.redis.port, config.redis.password, config.redis.db, config.redis.ssl)
 
+    # Create WorkflowDAO (data access layer for workflow CRUD + results)
+    from creato.database.mongo import (
+        agent_sessions_col, agent_messages_col, agent_tool_traces_col,
+        flow_col, flow_details_col, flow_version_col, results_col,
+    )
+    from creato.dao.workflow_dao import WorkflowDAO
+    workflow_dao = WorkflowDAO(
+        flow_col=flow_col,
+        flow_details_col=flow_details_col,
+        flow_version_col=flow_version_col,
+        results_col=results_col,
+        cloudfront_domain=config.api.cloudfront_domain,
+    )
+
     # Create SessionManager with new three-collection schema
-    from creato.database.mongo import agent_sessions_col, agent_messages_col, agent_tool_traces_col
     from creato.database.redis import redis_client
     session_manager = SessionManager(
         sessions_col=agent_sessions_col,
@@ -174,8 +187,8 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             # Register RunWorkflowTool into the agent's tool registry
             from creato.core.tools.opencreator import ContinueWorkflowTool, RunWorkflowTool
             app.state.agent.tools.register(RunWorkflowTool(
-                api_base=cfg.api.internal_api_base,
                 workflow_engine=app.state.workflow_engine,
+                workflow_dao=workflow_dao,
             ))
             app.state.agent.tools.register(ContinueWorkflowTool(
                 workflow_engine=app.state.workflow_engine,
@@ -253,6 +266,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         api_config=cfg.api,
         exec_config=cfg.tools.exec,
         restrict_to_workspace=cfg.tools.restrict_to_workspace,
+        workflow_dao=workflow_dao,
     )
     skills_loader = SkillsLoader()
     agent_factory = AgentFactory(

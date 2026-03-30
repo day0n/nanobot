@@ -5,12 +5,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import httpx
 from loguru import logger
 
 from creato.core.request_context import get_request_context
 from creato.core.tools.base import Tool
-from creato.core.tools.opencreator.common import _API_BASE
 
 
 class GetWorkflowResultsTool(Tool):
@@ -33,65 +31,45 @@ class GetWorkflowResultsTool(Tool):
         "required": [],
     }
 
-    def __init__(self, api_base: str = ""):
-        self.api_base = api_base.strip() or _API_BASE
+    def __init__(self, workflow_dao: Any = None):
+        self._dao = workflow_dao
 
     async def execute(self, **_: Any) -> str:
         request_context = get_request_context()
         flow_id = request_context.get("flow_id")
-        auth_token = request_context.get("auth_token")
+        user_id = request_context.get("user_id")
 
         if not isinstance(flow_id, str) or not flow_id.strip():
             return "Error: no flow_id in context. This tool requires an active canvas session."
-        if not isinstance(auth_token, str) or not auth_token.strip():
-            return "Error: no authenticated user token in context."
+        if not isinstance(user_id, str) or not user_id.strip():
+            return "Error: no authenticated user in context."
 
         flow_id = flow_id.strip()
-        auth_token = auth_token.strip()
+        user_id = user_id.strip()
+
+        if not self._dao:
+            return "Error: workflow data access is not configured."
 
         # 1. Get workflow to know all node IDs
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    f"{self.api_base.rstrip('/')}/api/v2/flow/project/{flow_id}",
-                    headers={"Authorization": f"Bearer {auth_token}"},
-                )
+            data = await self._dao.get_workflow(flow_id, user_id)
         except Exception as e:
             return f"Error: failed to fetch workflow — {e}"
 
-        if not resp.is_success:
-            return f"Error: API returned {resp.status_code}"
+        if not data:
+            return "Error: workflow not found."
 
-        data = resp.json().get("data", {})
         nodes = data.get("nodes", [])
         if not nodes:
             return "Error: workflow has no nodes."
 
         node_ids = [n["id"] for n in nodes if isinstance(n, dict) and "id" in n]
 
-        # 2. Fetch latest results for all nodes (V3 — only latest run per node)
+        # 2. Fetch latest results for all nodes
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"{self.api_base.rstrip('/')}/api/v3/result/all_batch_fetch",
-                    headers={
-                        "Authorization": f"Bearer {auth_token}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "workflow_id": flow_id,
-                        "node_ids": node_ids,
-                        "page": 1,
-                        "pageSize": 999,
-                    },
-                )
+            results_data = await self._dao.get_node_results(flow_id, user_id, node_ids)
         except Exception as e:
             return f"Error: failed to fetch results — {e}"
-
-        if not resp.is_success:
-            return f"Error: results API returned {resp.status_code}"
-
-        results_data = resp.json().get("data", {})
 
         # 3. Build a concise summary for LLM
         summary = {}

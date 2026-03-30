@@ -37,13 +37,13 @@ def _web_fetch(ctx: AgentContext) -> Tool:
 def _get_workflow(ctx: AgentContext) -> Tool:
     from creato.core.tools.opencreator import GetWorkflowTool
 
-    return GetWorkflowTool(api_base=ctx.api_config.internal_api_base)
+    return GetWorkflowTool(workflow_dao=ctx.workflow_dao)
 
 
 def _get_workflow_results(ctx: AgentContext) -> Tool:
     from creato.core.tools.opencreator import GetWorkflowResultsTool
 
-    return GetWorkflowResultsTool(api_base=ctx.api_config.internal_api_base)
+    return GetWorkflowResultsTool(workflow_dao=ctx.workflow_dao)
 
 
 def _get_node_spec(ctx: AgentContext) -> Tool:
@@ -56,8 +56,7 @@ def _edit_workflow(ctx: AgentContext) -> Tool:
     from creato.core.tools.opencreator import EditWorkflowTool
 
     return EditWorkflowTool(
-        api_base=ctx.api_config.internal_api_base,
-        internal_api_key=ctx.api_config.internal_api_key,
+        workflow_dao=ctx.workflow_dao,
         editor_base=ctx.api_config.editor_base,
     )
 

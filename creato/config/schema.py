@@ -87,9 +87,8 @@ class ApiServerConfig(Base):
     host: str = "0.0.0.0"
     port: int = 18791
     clerk_pem_public_key: str = ""  # Clerk RS256 PEM public key
-    internal_api_base: str = ""  # e.g. "https://api-develop.opencreator.io"
-    internal_api_key: str = ""  # Internal API key (plaintext, Base64 encoding handled internally)
     editor_base: str = ""  # e.g. "https://editor-dev.opencreator.io"
+    cloudfront_domain: str = ""  # e.g. "d1234.cloudfront.net" for S3→CDN URL conversion
 
 
 class WebSearchConfig(Base):

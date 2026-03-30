@@ -25,6 +25,7 @@ class AgentContext:
     api_config: Any  # ApiServerConfig
     exec_config: Any  # ExecToolConfig
     restrict_to_workspace: bool
+    workflow_dao: Any = None  # WorkflowDAO (optional for non-API mode)
 
 
 @dataclass(frozen=True)

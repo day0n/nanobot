@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
 from loguru import logger
 
 from creato.core.request_context import get_request_context
 from creato.core.tools.base import Tool, WorkflowExecution
-from creato.core.tools.opencreator.common import _API_BASE
 
 
 class RunWorkflowTool(Tool):
@@ -52,9 +50,9 @@ class RunWorkflowTool(Tool):
         "required": [],
     }
 
-    def __init__(self, api_base: str = "", workflow_engine: Any = None):
-        self.api_base = api_base.strip() or _API_BASE
+    def __init__(self, workflow_engine: Any = None, workflow_dao: Any = None):
         self._engine = workflow_engine
+        self._dao = workflow_dao
 
     async def execute(self, node_ids: list[str] | None = None, user_selection: dict | None = None, **_: Any) -> str | WorkflowExecution:
         from nanoid import generate as nanoid_generate
@@ -62,32 +60,32 @@ class RunWorkflowTool(Tool):
 
         request_context = get_request_context()
         flow_id = request_context.get("flow_id")
-        auth_token = request_context.get("auth_token")
         user_id = request_context.get("user_id")
 
         if not self._engine:
             return "Error: workflow engine is not configured on this server."
 
+        if not self._dao:
+            return "Error: workflow data access is not configured."
+
         if not isinstance(flow_id, str) or not flow_id.strip():
             return "Error: no flow_id in context. This tool requires an active canvas session."
 
-        if not isinstance(auth_token, str) or not auth_token.strip():
-            return "Error: no authenticated user token in context."
+        if not isinstance(user_id, str) or not user_id.strip():
+            return "Error: no authenticated user in context."
 
-        # 1. Fetch current workflow from Publisher API (reuse GetWorkflowTool logic)
+        flow_id = flow_id.strip()
+        user_id = user_id.strip()
+
+        # 1. Fetch current workflow from database
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    f"{self.api_base.rstrip('/')}/api/v2/flow/project/{flow_id.strip()}",
-                    headers={"Authorization": f"Bearer {auth_token.strip()}"},
-                )
+            data = await self._dao.get_workflow(flow_id, user_id)
         except Exception as e:
             return f"Error: failed to fetch workflow — {e}"
 
-        if not resp.is_success:
-            return f"Error: API returned {resp.status_code}"
+        if not data:
+            return "Error: workflow not found."
 
-        data = resp.json().get("data", {})
         nodes = data.get("nodes", [])
         edges = data.get("edges", [])
         if not nodes:
@@ -105,7 +103,7 @@ class RunWorkflowTool(Tool):
                 nodes=nodes,
                 edges=edges,
                 ws_id=ws_id,
-                user_id=user_id or "",
+                user_id=user_id,
                 start_ids=start_ids,
                 end_ids=end_ids,
                 user_selection=user_selection,

@@ -39,10 +39,19 @@ class ContinueWorkflowTool(Tool):
             "user_selection": {
                 "type": "object",
                 "description": (
-                    "The user's chosen outputs. Keys are pin types "
-                    "('text', 'image', 'video', 'audio'), values are arrays of "
-                    "{node_id, outputs: [{model, output, path}]}. "
-                    "Build this from get_workflow_results based on the user's choice."
+                    "The user's chosen outputs, keyed by pin type. "
+                    "Build this from get_workflow_results output. Example:\n"
+                    '{\n'
+                    '  "text": [{\n'
+                    '    "node_id": "textGenerator-abc123",\n'
+                    '    "outputs": [{"model": "openai/gpt-4o-mini", "output": "the full text content", "path": ""}]\n'
+                    '  }]\n'
+                    '}\n'
+                    "Keys are pin types: 'text', 'image', 'video', 'audio'. "
+                    "For text nodes, 'output' is the text content. "
+                    "For media nodes, 'output' is the CDN URL. "
+                    "'path' can be empty string. "
+                    "Include only the output(s) the user chose, not all of them."
                 ),
             },
         },

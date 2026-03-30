@@ -1,25 +1,22 @@
-"""EditWorkflowTool — edit workflow via Internal API."""
+"""EditWorkflowTool — edit workflow via WorkflowDAO."""
 
 from __future__ import annotations
 
-import base64
 import json
 from typing import Any
 
-import httpx
 from loguru import logger
 
 from creato.core.request_context import get_request_context
 from creato.core.tools.base import Tool, ToolResult
 from creato.schemas.tools import ToolEventPayload
 from creato.core.tools.opencreator.common import (
-    _API_BASE, _EDITOR_BASE,
     _normalize_nodes, _normalize_edges, _find_position_issues,
 )
 
 
 class EditWorkflowTool(Tool):
-    """Edit an OpenCreator workflow in the current canvas via the Internal API."""
+    """Edit an OpenCreator workflow in the current canvas via WorkflowDAO."""
 
     name = "edit_workflow"
     description = (
@@ -57,18 +54,11 @@ class EditWorkflowTool(Tool):
 
     def __init__(
         self,
-        api_base: str = "",
-        internal_api_key: str = "",
-        editor_base: str = _EDITOR_BASE,
+        workflow_dao: Any = None,
+        editor_base: str = "",
     ):
-        self.api_base = api_base.strip() or _API_BASE
-        self.internal_api_key = internal_api_key.strip()
-        self.editor_base = editor_base.rstrip("/") or _EDITOR_BASE
-
-    def _auth_header(self) -> str:
-        if not self.internal_api_key:
-            raise ValueError("internal_api_key is not configured. Set CREATO_API__INTERNAL_API_KEY in .env.local.")
-        return base64.b64encode(self.internal_api_key.encode("utf-8")).decode("ascii")
+        self._dao = workflow_dao
+        self.editor_base = editor_base.rstrip("/") if editor_base else ""
 
     async def execute(
         self,
@@ -76,7 +66,7 @@ class EditWorkflowTool(Tool):
         nodes: list,
         edges: list,
         **_: Any,
-    ) -> str:
+    ) -> str | ToolResult:
         request_context = get_request_context()
         user_id = request_context.get("user_id")
         flow_id = request_context.get("flow_id")
@@ -89,9 +79,11 @@ class EditWorkflowTool(Tool):
             return "Error: no flow_id in context. This tool requires an active canvas session with an existing workflow."
         flow_id = flow_id.strip()
 
+        if not self._dao:
+            return "Error: workflow data access is not configured."
+
         normalized_nodes, id_map, node_warnings = _normalize_nodes(nodes)
         if not normalized_nodes and nodes:
-            # Caller provided nodes but all were invalid — report the errors.
             warning_text = "\n".join(f"- {w}" for w in node_warnings[:20]) if node_warnings else ""
             return (
                 "Error: no valid nodes left after preflight normalization.\n"
@@ -104,47 +96,21 @@ class EditWorkflowTool(Tool):
         position_warnings = _find_position_issues(normalized_nodes)
         preflight_warnings = node_warnings + edge_warnings + position_warnings
 
-        payload = {
-            "user_id": user_id,
-            "flow_id": flow_id,
-            "nodes": normalized_nodes,
-            "edges": normalized_edges,
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": self._auth_header(),
-        }
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"{self.api_base.rstrip('/')}/api/internal/workflow/edit",
-                    headers=headers,
-                    content=json.dumps(payload, ensure_ascii=False),
-                )
+            await self._dao.update_workflow(flow_id, user_id, normalized_nodes, normalized_edges)
+        except ValueError as exc:
+            return f"Error: validation failed — {exc}"
         except Exception as e:
-            logger.error("edit_workflow HTTP error: {}", e)
-            return f"Error: HTTP request failed — {e}"
-
-        if resp.status_code == 404:
-            return "Error: workflow or user not found."
-
-        if not resp.is_success:
-            return f"Error: API returned {resp.status_code} — {resp.text[:500]}"
-
-        try:
-            data = resp.json()
-        except Exception:
-            return f"Error: Could not parse API response — {resp.text[:300]}"
-
-        result_flow_id = data.get("flow_id") or data.get("data", {}).get("flow_id") or flow_id
-        editor_url = f"{self.editor_base}/canvas/{result_flow_id}"
+            logger.error("edit_workflow error: {}", e)
+            return f"Error: failed to update workflow — {e}"
 
         message = (
             f"Workflow updated successfully!\n"
-            f"  flow_id: {result_flow_id}\n"
-            f"  Editor URL: {editor_url}\n"
+            f"  flow_id: {flow_id}\n"
             f"  Nodes: {len(normalized_nodes)}, Edges: {len(normalized_edges)}"
         )
+        if self.editor_base:
+            message += f"\n  Editor URL: {self.editor_base}/canvas/{flow_id}"
         if preflight_warnings:
             preview = "\n".join(f"  - {w}" for w in preflight_warnings[:8])
             if len(preflight_warnings) > 8:
@@ -152,5 +118,5 @@ class EditWorkflowTool(Tool):
             message += f"\nPreflight adjustments:\n{preview}"
         return ToolResult(
             content=message,
-            events=[ToolEventPayload(name="workflow_update", data={"flow_id": result_flow_id})],
+            events=[ToolEventPayload(name="workflow_update", data={"flow_id": flow_id})],
         )
