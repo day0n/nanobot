@@ -11,50 +11,67 @@ from creato.core.tools.base import Tool, WorkflowExecution
 
 
 class ContinueWorkflowTool(Tool):
-    """Continue the current paused workflow using request-scoped context."""
+    """Continue a paused workflow after the user has chosen which result to use."""
 
     name = "continue_workflow"
     description = (
-        "Continue a paused workflow after the user has completed the required "
-        "canvas selection. Call this when the workflow previously paused in "
-        "select mode and the user now wants to continue."
+        "Continue a paused workflow after the user has chosen which output to use. "
+        "You MUST call get_workflow_results first to verify the available outputs, "
+        "then build user_selection from the user's choice. "
+        "The flow_task_id, flow_run_id, and ws_id come from the paused workflow context "
+        "returned by run_workflow."
     )
     parameters = {
         "type": "object",
-        "properties": {},
-        "required": [],
+        "properties": {
+            "flow_task_id": {
+                "type": "string",
+                "description": "The flow_task_id from the paused workflow context.",
+            },
+            "flow_run_id": {
+                "type": "string",
+                "description": "The flow_run_id from the paused workflow context.",
+            },
+            "ws_id": {
+                "type": "string",
+                "description": "The ws_id from the paused workflow context.",
+            },
+            "user_selection": {
+                "type": "object",
+                "description": (
+                    "The user's chosen outputs. Keys are pin types "
+                    "('text', 'image', 'video', 'audio'), values are arrays of "
+                    "{node_id, outputs: [{model, output, path}]}. "
+                    "Build this from get_workflow_results based on the user's choice."
+                ),
+            },
+        },
+        "required": ["flow_task_id", "flow_run_id", "ws_id", "user_selection"],
     }
 
     def __init__(self, workflow_engine: Any = None):
         self._engine = workflow_engine
 
-    async def execute(self, **_: Any) -> str | WorkflowExecution:
+    async def execute(
+        self,
+        flow_task_id: str = "",
+        flow_run_id: str = "",
+        ws_id: str = "",
+        user_selection: dict | None = None,
+        **_: Any,
+    ) -> str | WorkflowExecution:
         from creato.workflow.event_bridge import register, unregister
 
         request_context = get_request_context()
         user_id = request_context.get("user_id")
-        continue_ctx = request_context.get("continue_workflow")
 
         if not self._engine:
             return "Error: workflow engine is not configured on this server."
 
-        if not isinstance(continue_ctx, dict):
-            return "Error: no continue_workflow context in the current request."
-
-        flow_task_id = continue_ctx.get("flow_task_id")
-        flow_run_id = continue_ctx.get("flow_run_id")
-        ws_id = continue_ctx.get("ws_id")
-
-        if not isinstance(flow_task_id, str) or not flow_task_id.strip():
-            return "Error: continue_workflow.flow_task_id is required."
-        if not isinstance(flow_run_id, str) or not flow_run_id.strip():
-            return "Error: continue_workflow.flow_run_id is required."
-        if not isinstance(ws_id, str) or not ws_id.strip():
-            return "Error: continue_workflow.ws_id is required."
-        if "user_selection" not in continue_ctx:
-            return "Error: continue_workflow.user_selection is required."
-
-        user_selection = continue_ctx.get("user_selection")
+        if not flow_task_id or not flow_run_id or not ws_id:
+            return "Error: flow_task_id, flow_run_id, and ws_id are all required."
+        if user_selection is None:
+            return "Error: user_selection is required."
 
         event_queue = register(ws_id)
 

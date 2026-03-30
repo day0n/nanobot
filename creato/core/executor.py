@@ -368,8 +368,13 @@ class AgentExecutor:
                             "node_id": node_id,
                         })
                     result_str = (
-                        f"Workflow paused: node {node_id} needs user "
-                        "selection on the canvas."
+                        f"Workflow paused: node {node_id} entered select mode — "
+                        f"it produced multiple outputs and the downstream node needs "
+                        f"the user to choose which result to use.\n"
+                        f"Paused workflow context: flow_task_id={wf_exec.flow_task_id}, "
+                        f"flow_run_id={wf_exec.run_id}, ws_id={wf_exec.ws_id}\n"
+                        f"Next step: call get_workflow_results to see the available "
+                        f"outputs, then present the choices to the user."
                     )
                     got_terminal = True
                     break
