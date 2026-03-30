@@ -15,6 +15,7 @@ from typing import Any
 from loguru import logger
 
 from creato.providers.base import LLMProvider, LLMResponse, LLMStreamChunk, ToolCallRequest
+from creato.schemas.messages import MessageList
 
 # Preview models that require location='global' on Vertex AI
 _PREVIEW_MODELS = {
@@ -230,7 +231,7 @@ class VertexGeminiProvider(LLMProvider):
 
     async def chat(
         self,
-        messages: list[dict[str, Any]],
+        messages: MessageList,
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         max_tokens: int = 4096,
@@ -328,7 +329,7 @@ class VertexGeminiProvider(LLMProvider):
 
     async def chat_stream(
         self,
-        messages: list[dict[str, Any]],
+        messages: MessageList,
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         max_tokens: int = 4096,

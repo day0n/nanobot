@@ -10,6 +10,7 @@ from loguru import logger
 
 from creato.core.request_context import get_request_context
 from creato.core.tools.base import Tool, ToolResult
+from creato.schemas.tools import ToolEventPayload
 from creato.core.tools.opencreator.common import _API_BASE
 
 
@@ -92,13 +93,13 @@ class GetWorkflowTool(Tool):
 
         return ToolResult(
             content=json.dumps(result, ensure_ascii=False, indent=2),
-            events=[{
-                "name": "get_workflow",
-                "data": {
+            events=[ToolEventPayload(
+                name="get_workflow",
+                data={
                     "flow_id": result["flow_id"],
                     "project_name": project_name,
                     "node_count": len(nodes),
                     "edge_count": len(edges),
                 },
-            }],
+            )],
         )

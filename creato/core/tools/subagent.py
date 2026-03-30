@@ -7,8 +7,20 @@ from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
-from creato.core.events import AgentEvent, subagent_completed, subagent_started
-from creato.core.executor import AgentExecutor, ExecutorHooks, ExecutorResult
+from creato.core.events import (
+    AgentEvent,
+    subagent_completed,
+    subagent_message_delta,
+    subagent_started,
+    subagent_step_completed,
+    subagent_step_started,
+    subagent_tool_completed,
+    subagent_tool_event,
+    subagent_tool_started,
+)
+from creato.core.executor import AgentExecutor, ExecutorHooks
+from creato.schemas.executor import ExecutorResult
+from creato.schemas.tools import SubagentRequest, SubagentResult
 from creato.core.prompt.runtime import build_runtime_context
 from creato.core.request_context import (
     get_request_context,
@@ -72,7 +84,7 @@ class SubagentTool(Tool):
                     "type": "string",
                     "description": "The task for the subagent to perform.",
                 },
-                "agent_type": {
+              "agent_type": {
                     "type": "string",
                     "enum": names or ["researcher"],
                     "description": "The type of subagent to spawn.",
@@ -84,23 +96,26 @@ class SubagentTool(Tool):
     async def execute(self, task: str, agent_type: str, **kwargs: Any) -> str:
         from creato.core.factory import _MAX_DEPTH
 
+        # Validate input via Pydantic
+        req = SubagentRequest(task=task, agent_type=agent_type)
+
         if self._depth >= _MAX_DEPTH:
             return f"Error: Maximum subagent depth ({_MAX_DEPTH}) reached."
 
-        profile = self._registry.get(agent_type)
+        profile = self._registry.get(req.agent_type)
         if profile is None:
             available = ", ".join(p.name for p in self._registry.subagent_profiles()) or "(none)"
-            return f"Error: Unknown agent type '{agent_type}'. Available: {available}"
+            return f"Error: Unknown agent type '{req.agent_type}'. Available: {available}"
 
         parent_ctx = get_request_context()
         token = set_request_context(parent_ctx)
         try:
-            return await self._run_subagent(profile, task)
+            return await self._run_subagent(profile, req.task)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("Subagent '{}' failed", agent_type)
-            return f"Error: Subagent '{agent_type}' failed: {exc}"
+            logger.exception("Subagent '{}' failed", req.agent_type)
+            return f"Error: Subagent '{req.agent_type}' failed: {exc}"
         finally:
             reset_request_context(token)
 
@@ -136,6 +151,14 @@ class SubagentTool(Tool):
         )
         result: ExecutorResult = await executor.run(messages)
 
+        # Build structured result
+        subagent_result = SubagentResult(
+            agent_type=profile.name,
+            content=result.content or "(no output)",
+            tools_used=result.tools_used,
+            iterations=result.iterations,
+        )
+
         # Emit completion event
         if self._on_progress:
             await self._on_progress(subagent_completed(
@@ -144,10 +167,7 @@ class SubagentTool(Tool):
                 result_preview=result.content or "",
             ))
 
-        # Format return
-        tool_summary = ", ".join(sorted(set(result.tools_used))) if result.tools_used else "none"
-        content = result.content or "(no output)"
-        return f"[subagent:{profile.name} | {result.iterations} iterations | tools: {tool_summary}]\n\n{content}"
+        return subagent_result.to_tool_response()
 
     def _build_child_hooks(self) -> ExecutorHooks:
         """Create hooks that forward events to parent's progress callback."""
@@ -156,28 +176,22 @@ class SubagentTool(Tool):
             return ExecutorHooks()
 
         async def on_text_delta(text: str) -> None:
-            await progress(AgentEvent(event="subagent.message.delta", data={"content": text}))
+            await progress(subagent_message_delta(text))
 
-        async def on_tool_start(name: str, call_id: str, arguments: dict) -> None:
-            await progress(AgentEvent(
-                event="subagent.tool.started",
-                data={"tool_name": name, "tool_call_id": call_id, "arguments": arguments},
-            ))
+        async def on_tool_start(name: str, call_id: str, arguments: dict[str, Any]) -> None:
+            await progress(subagent_tool_started(name, call_id, arguments))
 
-        async def on_tool_end(name: str, call_id: str, duration_ms: int, error: str | None, args: dict | None = None, output: str = "") -> None:
-            data: dict[str, Any] = {"tool_name": name, "tool_call_id": call_id, "duration_ms": duration_ms}
-            if error:
-                data["error"] = error
-            await progress(AgentEvent(event="subagent.tool.completed", data=data))
+        async def on_tool_end(name: str, call_id: str, duration_ms: int, error: str | None, args: dict[str, Any] | None = None, output: str = "") -> None:
+            await progress(subagent_tool_completed(name, call_id, duration_ms, error))
 
-        async def on_tool_event(event_name: str, data: dict) -> None:
-            await progress(AgentEvent(event="subagent.tool.event", data={"event_name": event_name, **data}))
+        async def on_tool_event(event_name: str, data: dict[str, Any]) -> None:
+            await progress(subagent_tool_event(event_name, data))
 
         async def on_step_start(step: int) -> None:
-            await progress(AgentEvent(event="subagent.step.started", data={"step": step}))
+            await progress(subagent_step_started(step))
 
         async def on_step_end(step: int) -> None:
-            await progress(AgentEvent(event="subagent.step.completed", data={"step": step}))
+            await progress(subagent_step_completed(step))
 
         return ExecutorHooks(
             on_step_start=on_step_start,

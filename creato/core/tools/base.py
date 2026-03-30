@@ -5,19 +5,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
 
-
-@dataclass(slots=True)
-class ToolResult:
-    """Rich return type for tools that need to emit side-channel events.
-
-    Tools that only return text can keep returning ``str``.  Tools that
-    also need to notify the frontend (e.g. ``workflow_update``) return a
-    ``ToolResult`` instead — the loop dispatches ``events`` via SSE while
-    feeding ``content`` back to the LLM.
-    """
-
-    content: str
-    events: list[dict[str, Any]] = field(default_factory=list)
+from creato.schemas.tools import ToolResult  # noqa: F401 — re-exported for backward compat
 
 
 @dataclass(slots=True)

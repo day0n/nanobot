@@ -11,6 +11,7 @@ from loguru import logger
 from openai import AsyncOpenAI
 
 from creato.providers.base import LLMProvider, LLMResponse, LLMStreamChunk, ToolCallRequest
+from creato.schemas.messages import MessageList
 
 # Models that use max_completion_tokens instead of max_tokens,
 # AND don't support the temperature parameter.
@@ -145,7 +146,7 @@ class OpenAIProvider(LLMProvider):
 
     async def chat(
         self,
-        messages: list[dict[str, Any]],
+        messages: MessageList,
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         max_tokens: int = 4096,
@@ -185,7 +186,7 @@ class OpenAIProvider(LLMProvider):
 
     async def chat_stream(
         self,
-        messages: list[dict[str, Any]],
+        messages: MessageList,
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         max_tokens: int = 4096,

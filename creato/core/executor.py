@@ -19,6 +19,8 @@ from loguru import logger
 from creato.core.prompt.builder import add_assistant_message, add_tool_result
 from creato.core.tools.base import ToolResult, WorkflowExecution
 from creato.core.tools.registry import ToolRegistry
+from creato.schemas.executor import ExecutorResult
+from creato.schemas.messages import MessageList
 from creato.providers.base import LLMProvider, LLMResponse
 
 _THINK_RE = re.compile(r"<think>[\s\S]*?</think>")
@@ -41,30 +43,15 @@ class ExecutorHooks:
 
     on_step_start: Callable[[int], Awaitable[None]] | None = None
     on_step_end: Callable[[int], Awaitable[None]] | None = None
-    on_llm_start: Callable[[str, list[dict]], Awaitable[None]] | None = None
+    on_llm_start: Callable[[str, MessageList], Awaitable[None]] | None = None
     on_llm_end: Callable[[dict[str, int]], Awaitable[None]] | None = None
     on_text_delta: Callable[[str], Awaitable[None]] | None = None
-    on_tool_start: Callable[[str, str, dict], Awaitable[None]] | None = None
-    on_tool_end: Callable[[str, str, int, str | None, dict, str], Awaitable[None]] | None = None
-    on_tool_event: Callable[[str, dict], Awaitable[None]] | None = None
-    on_workflow_start: Callable[[dict], Awaitable[None]] | None = None
-    on_workflow_event: Callable[[dict], Awaitable[None]] | None = None
-    on_workflow_paused: Callable[[dict], Awaitable[None]] | None = None
-
-
-# ---------------------------------------------------------------------------
-# Result container
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ExecutorResult:
-    """Structured result from AgentExecutor.run()."""
-
-    content: str | None = None
-    tools_used: list[str] = field(default_factory=list)
-    messages: list[dict] = field(default_factory=list)
-    tool_timings: dict[str, dict] = field(default_factory=dict)
-    iterations: int = 0
+    on_tool_start: Callable[[str, str, dict[str, Any]], Awaitable[None]] | None = None
+    on_tool_end: Callable[[str, str, int, str | None, dict[str, Any], str], Awaitable[None]] | None = None
+    on_tool_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
+    on_workflow_start: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    on_workflow_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    on_workflow_paused: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +100,7 @@ class AgentExecutor:
     # Public API
     # ------------------------------------------------------------------
 
-    async def run(self, messages: list[dict]) -> ExecutorResult:
+    async def run(self, messages: MessageList) -> ExecutorResult:
         """Execute the LLM / tool loop until the model stops or we hit the cap.
 
         Parameters
@@ -337,8 +324,8 @@ class AgentExecutor:
             for evt in result_obj.events:
                 if self.hooks.on_tool_event:
                     await self.hooks.on_tool_event(
-                        evt.get("name", "tool.output"),
-                        evt.get("data", {}),
+                        evt.name,
+                        evt.data,
                     )
             return result_obj.content
 

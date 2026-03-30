@@ -6,6 +6,11 @@ This module serves as the contract between backend and frontend.
 Event naming follows dot-notation (e.g. ``tool.started``), inspired by
 the OpenAI Responses API.  Every event is wrapped in an :class:`AgentEvent`
 envelope that serialises to ``{"event": "<name>", "data": {…}}``.
+
+Low-frequency event payloads are validated via Pydantic models from
+``creato.schemas.events``.  High-frequency ``message.delta`` uses
+TypedDict (zero overhead).  Workflow events pass through raw dicts from
+the external Consumer protocol.
 """
 
 from __future__ import annotations
@@ -13,6 +18,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
+
+from creato.schemas.events import (
+    AgentCompletedData,
+    AgentFailedData,
+    AgentResponse,
+    AgentStartedData,
+    StepData,
+    SubagentCompletedData,
+    SubagentStartedData,
+    SubagentToolCompletedData,
+    ToolCompletedData,
+    ToolEventData,
+    ToolFailedData,
+    ToolStartedData,
+)
+from creato.schemas.messages import MessageDeltaData
 
 
 # ── event envelope ──────────────────────────────────────────────────
@@ -30,36 +51,6 @@ class AgentEvent:
 
     def to_dict(self) -> dict[str, Any]:
         return {"event": self.event, "data": self.data}
-
-
-# ── non-streaming response object ──────────────────────────────────
-
-@dataclass
-class AgentResponse:
-    """Non-streaming response, also reconstructable from streaming events."""
-
-    id: str
-    session_id: str
-    status: str  # "completed" | "failed"
-    output: list[dict[str, Any]] = field(default_factory=list)
-    usage: dict[str, int] | None = None
-    model: str | None = None
-    error: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {
-            "id": self.id,
-            "session_id": self.session_id,
-            "status": self.status,
-            "output": self.output,
-        }
-        if self.usage:
-            d["usage"] = self.usage
-        if self.model:
-            d["model"] = self.model
-        if self.error:
-            d["error"] = self.error
-        return d
 
 
 # ── event name constants ────────────────────────────────────────────
@@ -90,26 +81,29 @@ _WORKFLOW_KILLED = "workflow.killed"
 
 _SUBAGENT_STARTED = "subagent.started"
 _SUBAGENT_COMPLETED = "subagent.completed"
+_SUBAGENT_MESSAGE_DELTA = "subagent.message.delta"
+_SUBAGENT_TOOL_STARTED = "subagent.tool.started"
+_SUBAGENT_TOOL_COMPLETED = "subagent.tool.completed"
+_SUBAGENT_TOOL_EVENT = "subagent.tool.event"
+_SUBAGENT_STEP_STARTED = "subagent.step.started"
+_SUBAGENT_STEP_COMPLETED = "subagent.step.completed"
 
 
 # ── constructor functions ───────────────────────────────────────────
 
 def agent_started(session_id: str, run_id: str | None = None) -> AgentEvent:
-    return AgentEvent(
-        event=_AGENT_STARTED,
-        data={"session_id": session_id, "run_id": run_id or uuid4().hex[:12]},
-    )
+    payload = AgentStartedData(session_id=session_id, run_id=run_id or uuid4().hex[:12])
+    return AgentEvent(event=_AGENT_STARTED, data=payload.model_dump())
 
 
 def agent_completed(content: str, usage: dict[str, int] | None = None) -> AgentEvent:
-    d: dict[str, Any] = {"content": content}
-    if usage:
-        d["usage"] = usage
-    return AgentEvent(event=_AGENT_COMPLETED, data=d)
+    payload = AgentCompletedData(content=content, usage=usage)
+    return AgentEvent(event=_AGENT_COMPLETED, data=payload.model_dump(exclude_none=True))
 
 
 def agent_failed(error: str) -> AgentEvent:
-    return AgentEvent(event=_AGENT_FAILED, data={"error": error})
+    payload = AgentFailedData(error=error)
+    return AgentEvent(event=_AGENT_FAILED, data=payload.model_dump())
 
 
 def agent_heartbeat() -> AgentEvent:
@@ -117,7 +111,8 @@ def agent_heartbeat() -> AgentEvent:
 
 
 def message_delta(content: str) -> AgentEvent:
-    return AgentEvent(event=_MESSAGE_DELTA, data={"content": content})
+    # High-frequency — TypedDict, no Pydantic overhead
+    return AgentEvent(event=_MESSAGE_DELTA, data=MessageDeltaData(content=content))
 
 
 def tool_started(
@@ -125,43 +120,33 @@ def tool_started(
     tool_call_id: str,
     arguments: dict[str, Any] | None = None,
 ) -> AgentEvent:
-    return AgentEvent(
-        event=_TOOL_STARTED,
-        data={
-            "tool_name": tool_name,
-            "tool_call_id": tool_call_id,
-            "arguments": arguments or {},
-        },
-    )
+    payload = ToolStartedData(tool_name=tool_name, tool_call_id=tool_call_id, arguments=arguments or {})
+    return AgentEvent(event=_TOOL_STARTED, data=payload.model_dump())
 
 
 def tool_completed(tool_call_id: str, duration_ms: int) -> AgentEvent:
-    return AgentEvent(
-        event=_TOOL_COMPLETED,
-        data={"tool_call_id": tool_call_id, "duration_ms": duration_ms},
-    )
+    payload = ToolCompletedData(tool_call_id=tool_call_id, duration_ms=duration_ms)
+    return AgentEvent(event=_TOOL_COMPLETED, data=payload.model_dump())
 
 
 def tool_failed(tool_call_id: str, error: str) -> AgentEvent:
-    return AgentEvent(
-        event=_TOOL_FAILED,
-        data={"tool_call_id": tool_call_id, "error": error},
-    )
+    payload = ToolFailedData(tool_call_id=tool_call_id, error=error)
+    return AgentEvent(event=_TOOL_FAILED, data=payload.model_dump())
 
 
 def tool_event(event_name: str, data: dict[str, Any] | None = None) -> AgentEvent:
-    return AgentEvent(
-        event=_TOOL_EVENT,
-        data={"event_name": event_name, **(data or {})},
-    )
+    payload = ToolEventData(event_name=event_name, extra=data or {})
+    return AgentEvent(event=_TOOL_EVENT, data=payload.to_flat_dict())
 
 
 def step_started(step: int) -> AgentEvent:
-    return AgentEvent(event=_STEP_STARTED, data={"step": step})
+    payload = StepData(step=step)
+    return AgentEvent(event=_STEP_STARTED, data=payload.model_dump())
 
 
 def step_completed(step: int) -> AgentEvent:
-    return AgentEvent(event=_STEP_COMPLETED, data={"step": step})
+    payload = StepData(step=step)
+    return AgentEvent(event=_STEP_COMPLETED, data=payload.model_dump())
 
 
 # ── workflow event constructors (data is Consumer's raw event, passed through) ──
@@ -205,16 +190,53 @@ WORKFLOW_EVENT_MAP: dict[str, Any] = {
 }
 
 
+# ── subagent event constructors ────────────────────────────────────
+
 def subagent_started(agent_type: str, task: str) -> AgentEvent:
-    return AgentEvent(event=_SUBAGENT_STARTED, data={"agent_type": agent_type, "task": task[:200]})
+    payload = SubagentStartedData(agent_type=agent_type, task=task[:200])
+    return AgentEvent(event=_SUBAGENT_STARTED, data=payload.model_dump())
 
 
 def subagent_completed(agent_type: str, tools_used: list[str], result_preview: str) -> AgentEvent:
-    return AgentEvent(event=_SUBAGENT_COMPLETED, data={
-        "agent_type": agent_type,
-        "tools_used": tools_used,
-        "result_preview": result_preview[:200],
-    })
+    payload = SubagentCompletedData(
+        agent_type=agent_type, tools_used=tools_used, result_preview=result_preview[:200],
+    )
+    return AgentEvent(event=_SUBAGENT_COMPLETED, data=payload.model_dump())
+
+
+def subagent_message_delta(content: str) -> AgentEvent:
+    """Subagent text streaming — TypedDict (high-frequency)."""
+    return AgentEvent(event=_SUBAGENT_MESSAGE_DELTA, data=MessageDeltaData(content=content))
+
+
+def subagent_tool_started(tool_name: str, tool_call_id: str, arguments: dict[str, Any] | None = None) -> AgentEvent:
+    payload = ToolStartedData(tool_name=tool_name, tool_call_id=tool_call_id, arguments=arguments or {})
+    return AgentEvent(event=_SUBAGENT_TOOL_STARTED, data=payload.model_dump())
+
+
+def subagent_tool_completed(
+    tool_name: str, tool_call_id: str, duration_ms: int, error: str | None = None,
+) -> AgentEvent:
+    payload = SubagentToolCompletedData(
+        tool_name=tool_name, tool_call_id=tool_call_id,
+        duration_ms=duration_ms, error=error,
+    )
+    return AgentEvent(event=_SUBAGENT_TOOL_COMPLETED, data=payload.model_dump(exclude_none=True))
+
+
+def subagent_tool_event(event_name: str, data: dict[str, Any] | None = None) -> AgentEvent:
+    payload = ToolEventData(event_name=event_name, extra=data or {})
+    return AgentEvent(event=_SUBAGENT_TOOL_EVENT, data=payload.to_flat_dict())
+
+
+def subagent_step_started(step: int) -> AgentEvent:
+    payload = StepData(step=step)
+    return AgentEvent(event=_SUBAGENT_STEP_STARTED, data=payload.model_dump())
+
+
+def subagent_step_completed(step: int) -> AgentEvent:
+    payload = StepData(step=step)
+    return AgentEvent(event=_SUBAGENT_STEP_COMPLETED, data=payload.model_dump())
 
 
 # ── response accumulator ───────────────────────────────────────────

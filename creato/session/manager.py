@@ -19,6 +19,9 @@ from typing import Any
 
 from loguru import logger
 
+from creato.schemas.messages import MessageList, StoredMessage
+from creato.schemas.session import SessionMetaDoc, StoredMessageDoc, ToolTraceDoc
+
 
 REDIS_META_PREFIX = "agent:session:meta:"
 REDIS_CTX_PREFIX = "agent:session:ctx:"
@@ -37,7 +40,7 @@ class Session:
     user_id: str
     workflow_id: str | None = None
     channel: str = "api"
-    messages: list[dict[str, Any]] = field(default_factory=list)
+    messages: list[StoredMessage] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     summary: str | None = field(default=None)
@@ -70,7 +73,7 @@ class Session:
                                     declared.add(str(tc["id"]))
         return start
 
-    def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
+    def get_history(self, max_messages: int = 500) -> MessageList:
         """Return messages for LLM input, aligned to a legal tool-call boundary.
 
         Note: For LLM context, ``agent`` role messages are mapped back to ``assistant``
@@ -196,19 +199,22 @@ class SessionManager:
         new_messages = session.messages[session._persisted_count:]
 
         try:
-            # Upsert session metadata
-            set_fields: dict[str, Any] = {
-                "user_id": session.user_id,
-                "workflow_id": session.workflow_id,
-                "channel": session.channel,
-                "updated_at": now,
-                "message_count": session.message_count,
-                "turn_count": session.turn_count,
-                "last_message_preview": session.last_message_preview,
-                "metadata": session.metadata,
-            }
-            if session.summary is not None:
-                set_fields["summary"] = session.summary
+            # Upsert session metadata (write-side validation)
+            meta = SessionMetaDoc(
+                user_id=session.user_id,
+                workflow_id=session.workflow_id,
+                channel=session.channel,
+                summary=session.summary,
+                message_count=session.message_count,
+                turn_count=session.turn_count,
+                last_message_preview=session.last_message_preview,
+                created_at=session.created_at,
+                updated_at=now,
+                metadata=session.metadata,
+            )
+            set_fields = meta.model_dump(exclude_none=True)
+            # Remove created_at from $set — it goes in $setOnInsert
+            set_fields.pop("created_at", None)
             await self._sessions_col.update_one(
                 {"_id": session.session_id},
                 {
@@ -220,23 +226,27 @@ class SessionManager:
                 upsert=True,
             )
 
-            # Append only new messages
+            # Append only new messages (write-side validation)
             if new_messages:
                 base_seq = session._persisted_count
                 docs = [
                     {
                         "session_id": session.session_id,
                         "seq": base_seq + i,
-                        **msg,
+                        **StoredMessageDoc.model_validate(msg).model_dump(exclude_none=True),
                     }
                     for i, msg in enumerate(new_messages)
                 ]
                 await self._messages_col.insert_many(docs, ordered=True)
                 session._persisted_count = len(session.messages)
 
-            # Insert tool traces
+            # Insert tool traces (write-side validation)
             if tool_traces:
-                await self._traces_col.insert_many(tool_traces, ordered=False)
+                validated_traces = [
+                    ToolTraceDoc.model_validate(t).model_dump(exclude_none=True)
+                    for t in tool_traces
+                ]
+                await self._traces_col.insert_many(validated_traces, ordered=False)
 
         except Exception:
             logger.exception("Failed to save session {} to MongoDB", session.session_id)
@@ -503,7 +513,9 @@ class SessionManager:
                 msg_doc.pop("_id", None)
                 msg_doc.pop("session_id", None)
                 msg_doc.pop("seq", None)
-                messages.append(msg_doc)
+                # Read-side normalize: validate + strip unknown fields
+                validated = StoredMessageDoc.model_validate(msg_doc)
+                messages.append(validated.model_dump(exclude_none=True))
 
             created = meta_doc.get("created_at")
             updated = meta_doc.get("updated_at")
@@ -541,7 +553,12 @@ class SessionManager:
             created = datetime.fromisoformat(created)
         if isinstance(updated, str):
             updated = datetime.fromisoformat(updated)
-        messages = doc.get("messages", [])
+        messages_raw = doc.get("messages", [])
+        # Read-side normalize: validate each message from Redis cache
+        messages = [
+            StoredMessageDoc.model_validate(m).model_dump(exclude_none=True)
+            for m in messages_raw
+        ]
         return Session(
             session_id=doc["_id"],
             user_id=doc.get("user_id", ""),

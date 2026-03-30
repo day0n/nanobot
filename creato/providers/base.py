@@ -10,47 +10,8 @@ from typing import Any
 
 from loguru import logger
 
-
-@dataclass
-class ToolCallRequest:
-    """A tool call request from the LLM."""
-    id: str
-    name: str
-    arguments: dict[str, Any]
-    provider_specific_fields: dict[str, Any] | None = None
-    function_provider_specific_fields: dict[str, Any] | None = None
-
-    def to_openai_tool_call(self) -> dict[str, Any]:
-        """Serialize to an OpenAI-style tool_call payload."""
-        tool_call = {
-            "id": self.id,
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "arguments": json.dumps(self.arguments, ensure_ascii=False),
-            },
-        }
-        if self.provider_specific_fields:
-            tool_call["provider_specific_fields"] = self.provider_specific_fields
-        if self.function_provider_specific_fields:
-            tool_call["function"]["provider_specific_fields"] = self.function_provider_specific_fields
-        return tool_call
-
-
-@dataclass
-class LLMResponse:
-    """Response from an LLM provider."""
-    content: str | None
-    tool_calls: list[ToolCallRequest] = field(default_factory=list)
-    finish_reason: str = "stop"
-    usage: dict[str, int] = field(default_factory=dict)
-    reasoning_content: str | None = None  # Kimi, DeepSeek-R1 etc.
-    thinking_blocks: list[dict] | None = None  # Anthropic extended thinking
-    
-    @property
-    def has_tool_calls(self) -> bool:
-        """Check if response contains tool calls."""
-        return len(self.tool_calls) > 0
+from creato.schemas.messages import MessageList
+from creato.schemas.providers import LLMResponse, ToolCallRequest
 
 
 @dataclass
@@ -72,7 +33,7 @@ class LLMStreamChunk:
     text_delta: str = ""
     completed_tool_calls: list[ToolCallRequest] | None = None
     finish_reason: str | None = None
-    thinking_blocks: list[dict] | None = None
+    thinking_blocks: list[dict[str, Any]] | None = None
     usage: dict[str, int] | None = None
     error_content: str | None = None
 
@@ -211,7 +172,7 @@ class LLMProvider(ABC):
     @abstractmethod
     async def chat(
         self,
-        messages: list[dict[str, Any]],
+        messages: MessageList,
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         max_tokens: int = 4096,
@@ -319,7 +280,7 @@ class LLMProvider(ABC):
 
     async def chat_with_retry(
         self,
-        messages: list[dict[str, Any]],
+        messages: MessageList,
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         max_tokens: object = _SENTINEL,
@@ -430,7 +391,7 @@ class LLMProvider(ABC):
 
     async def chat_stream(
         self,
-        messages: list[dict[str, Any]],
+        messages: MessageList,
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         max_tokens: int = 4096,
@@ -459,7 +420,7 @@ class LLMProvider(ABC):
 
     async def chat_stream_with_retry(
         self,
-        messages: list[dict[str, Any]],
+        messages: MessageList,
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         max_tokens: object = _SENTINEL,

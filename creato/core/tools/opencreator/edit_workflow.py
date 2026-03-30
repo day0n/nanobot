@@ -11,6 +11,7 @@ from loguru import logger
 
 from creato.core.request_context import get_request_context
 from creato.core.tools.base import Tool, ToolResult
+from creato.schemas.tools import ToolEventPayload
 from creato.core.tools.opencreator.common import (
     _API_BASE, _EDITOR_BASE,
     _normalize_nodes, _normalize_edges, _find_position_issues,
@@ -151,5 +152,5 @@ class EditWorkflowTool(Tool):
             message += f"\nPreflight adjustments:\n{preview}"
         return ToolResult(
             content=message,
-            events=[{"name": "workflow_update", "data": {"flow_id": result_flow_id}}],
+            events=[ToolEventPayload(name="workflow_update", data={"flow_id": result_flow_id})],
         )
