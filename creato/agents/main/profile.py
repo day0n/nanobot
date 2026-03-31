@@ -61,6 +61,24 @@ def _edit_workflow(ctx: AgentContext) -> Tool:
     )
 
 
+def _run_workflow(ctx: AgentContext) -> Tool:
+    from creato.core.tools.opencreator import RunWorkflowTool
+
+    return RunWorkflowTool(
+        workflow_engine=ctx.workflow_engine,
+        workflow_dao=ctx.workflow_dao,
+    )
+
+
+def _continue_workflow(ctx: AgentContext) -> Tool:
+    from creato.core.tools.opencreator import ContinueWorkflowTool
+
+    return ContinueWorkflowTool(
+        workflow_engine=ctx.workflow_engine,
+        workflow_dao=ctx.workflow_dao,
+    )
+
+
 # ── Profile ─────────────────────────────────────────────────────────
 
 PROFILE = AgentProfile(
@@ -75,6 +93,8 @@ PROFILE = AgentProfile(
         _get_workflow_results,
         _get_node_spec,
         _edit_workflow,
+        _run_workflow,
+        _continue_workflow,
     ),
     inline_skills=("edit-workflow",),
     loadable_skills=("weather", "summarize", "workflow-user-guide"),

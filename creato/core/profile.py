@@ -26,6 +26,7 @@ class AgentContext:
     exec_config: Any  # ExecToolConfig
     restrict_to_workspace: bool
     workflow_dao: Any = None  # WorkflowDAO (optional for non-API mode)
+    workflow_engine: Any = None  # WorkflowEngine (optional, requires deploy_id)
 
 
 @dataclass(frozen=True)

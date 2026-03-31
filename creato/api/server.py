@@ -107,7 +107,6 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         init_rabbitmq,
         start_mq_consumer,
         close_rabbitmq,
-        get_reply_queue_name,
         set_dispatch_fn,
     )
     from creato.session.manager import SessionManager
@@ -148,6 +147,19 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         redis_client=redis_client,
     )
 
+    # Create WorkflowEngine (all deps are available synchronously)
+    workflow_engine = None
+    if config.workflow.deploy_id:
+        from creato.database.mongo import flow_task_col
+        from creato.database.redis import redis_client as rc_for_engine
+        reply_queue = f"flow_result.{config.workflow.deploy_id}"
+        workflow_engine = WorkflowEngine(
+            redis_client=rc_for_engine,
+            flow_task_col=flow_task_col,
+            publish_fn=run_flow.publish,
+            reply_queue=reply_queue,
+        )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # Startup: test connections and create indexes
@@ -171,41 +183,10 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                 prefetch_count=cfg.rabbitmq.prefetch_count,
                 virtualhost=cfg.rabbitmq.virtualhost,
             )
-
-            # Create WorkflowEngine and bind to app.state
-            from creato.database.mongo import flow_task_col
-            from creato.database.redis import redis_client as rc_for_engine
-            app.state.workflow_engine = WorkflowEngine(
-                redis_client=rc_for_engine,
-                flow_task_col=flow_task_col,
-                publish_fn=run_flow.publish,
-                reply_queue=get_reply_queue_name(),
-            )
-            app.state.config = cfg
+            app.state.workflow_engine = workflow_engine
             set_dispatch_fn(event_dispatch)
 
-            # Register RunWorkflowTool into the agent's tool registry
-            from creato.core.tools.opencreator import ContinueWorkflowTool, RunWorkflowTool
-            app.state.agent.tools.register(RunWorkflowTool(
-                workflow_engine=app.state.workflow_engine,
-                workflow_dao=workflow_dao,
-            ))
-            app.state.agent.tools.register(ContinueWorkflowTool(
-                workflow_engine=app.state.workflow_engine,
-                workflow_dao=workflow_dao,
-            ))
-            # Tool definitions are passed to the LLM on each call, so the model
-            # discovers new tools automatically. But the system prompt also lists
-            # tool names explicitly, so rebuild it with the updated registry.
-            from creato.agents.main.prompt import build_main_system_prompt
-            _allowed = list(main_profile.inline_skills) + list(main_profile.loadable_skills)
-            _filtered = skills_loader.filtered(_allowed)
-            app.state.agent.context._system_prompt_override = build_main_system_prompt(
-                skills_loader=_filtered,
-                tool_names=app.state.agent.tools.tool_names,
-            )
-
-            logger.info(f"Workflow engine ready, reply_queue={get_reply_queue_name()}")
+            logger.info(f"Workflow engine ready, reply_queue={workflow_engine._reply_queue}")
 
         yield
 
@@ -268,6 +249,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         exec_config=cfg.tools.exec,
         restrict_to_workspace=cfg.tools.restrict_to_workspace,
         workflow_dao=workflow_dao,
+        workflow_engine=workflow_engine,
     )
     skills_loader = SkillsLoader()
     agent_factory = AgentFactory(
