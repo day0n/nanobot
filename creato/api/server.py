@@ -23,6 +23,7 @@ from creato.core.events import (
     agent_failed,
     agent_heartbeat,
     agent_started,
+    agent_stopped,
 )
 from creato.core.loop import AgentLoop
 from creato.core.profile import AgentContext
@@ -47,6 +48,14 @@ class ChatRequest(BaseModel):
     flow_id: str | None = None
     metadata: dict | None = None  # frontend-provided metadata (files, etc.)
     stream: bool = True  # default true for backwards compat
+
+
+class AbortRequest(BaseModel):
+    session_id: str
+
+
+# Track running agent tasks by session_id: (asyncio.Task, event queue)
+_running_tasks: dict[str, tuple[asyncio.Task, asyncio.Queue]] = {}
 
 
 def _authenticate_agent_request(
@@ -352,11 +361,15 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                         workflow_id=flow_id,
                     )
                     await queue.put(agent_completed(result or ""))
+                except asyncio.CancelledError:
+                    # Stopped by user via /stop endpoint — agent.stopped already in queue
+                    logger.info(f"Agent task cancelled for session {session_id}")
                 except Exception as e:
                     logger.exception("Agent error")
                     await queue.put(agent_failed(str(e)))
 
             task = asyncio.create_task(run_agent())
+            _running_tasks[session_id] = (task, queue)
             try:
                 while True:
                     try:
@@ -368,6 +381,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                     if event.is_terminal:
                         break
             finally:
+                _running_tasks.pop(session_id, None)
                 task.cancel()
 
         if not body.stream:
@@ -404,6 +418,28 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                 "X-Accel-Buffering": "no",
             },
         )
+
+    # ---- POST /api/v1/agent/chat/stop — cancel a running SSE agent task ----
+
+    @app.post("/api/v1/agent/chat/stop")
+    async def stop_chat(
+        body: AbortRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        _authenticate_agent_request(authorization, cfg)
+
+        entry = _running_tasks.get(body.session_id)
+        if not entry:
+            return {"status": "not_found", "message": "No running task for this session"}
+
+        task, queue = entry
+        # 1. Push terminal event so SSE stream ends cleanly for frontend
+        await queue.put(agent_stopped())
+        # 2. Cancel the asyncio task — propagates CancelledError through
+        #    agent loop → RunWorkflowTool → engine.kill() → Redis flag → Consumer stops
+        task.cancel()
+        _running_tasks.pop(body.session_id, None)
+        return {"status": "stopped", "session_id": body.session_id}
 
     # ---- GET /v1/agent/sessions — lazy-loaded session list ----
     # Supports two modes:

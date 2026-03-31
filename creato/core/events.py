@@ -47,7 +47,7 @@ class AgentEvent:
 
     @property
     def is_terminal(self) -> bool:
-        return self.event in (_AGENT_COMPLETED, _AGENT_FAILED)
+        return self.event in (_AGENT_COMPLETED, _AGENT_FAILED, _AGENT_STOPPED)
 
     def to_dict(self) -> dict[str, Any]:
         return {"event": self.event, "data": self.data}
@@ -58,6 +58,7 @@ class AgentEvent:
 _AGENT_STARTED = "agent.started"
 _AGENT_COMPLETED = "agent.completed"
 _AGENT_FAILED = "agent.failed"
+_AGENT_STOPPED = "agent.stopped"
 _AGENT_HEARTBEAT = "agent.heartbeat"
 
 _MESSAGE_DELTA = "message.delta"
@@ -104,6 +105,10 @@ def agent_completed(content: str, usage: dict[str, int] | None = None) -> AgentE
 def agent_failed(error: str) -> AgentEvent:
     payload = AgentFailedData(error=error)
     return AgentEvent(event=_AGENT_FAILED, data=payload.model_dump())
+
+
+def agent_stopped() -> AgentEvent:
+    return AgentEvent(event=_AGENT_STOPPED, data={})
 
 
 def agent_heartbeat() -> AgentEvent:

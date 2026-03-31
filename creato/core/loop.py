@@ -365,7 +365,7 @@ class AgentLoop:
                 # skip = system(1) + dynamic context msg(0 or 1) + history
                 _has_dynamic_ctx = bool(context_summary or memory_context)
                 skip = 1 + int(_has_dynamic_ctx) + len(history)
-                self._save_turn(session, all_msgs, skip, tool_timings)
+                self._save_turn(session, all_msgs, skip, tool_timings, request_metadata=msg.metadata)
                 await self.sessions.save(session, tool_traces=self._pending_traces)
                 self._pending_traces = []
                 self._maybe_generate_summary(session)
@@ -443,7 +443,7 @@ class AgentLoop:
             # skip = system(1) + dynamic context msg(0 or 1) + history
             _has_dynamic_ctx = bool(context_summary or memory_context)
             skip = 1 + int(_has_dynamic_ctx) + len(history)
-            self._save_turn(session, all_msgs, skip, tool_timings)
+            self._save_turn(session, all_msgs, skip, tool_timings, request_metadata=msg.metadata)
             await self.sessions.save(session, tool_traces=self._pending_traces)
             self._pending_traces = []
             self._maybe_generate_summary(session)
@@ -479,7 +479,7 @@ class AgentLoop:
                 )
             reset_posthog_context(_posthog_token)
 
-    def _save_turn(self, session: Session, messages: list[dict], skip: int, tool_timings: dict[str, dict] | None = None) -> None:
+    def _save_turn(self, session: Session, messages: list[dict], skip: int, tool_timings: dict[str, dict] | None = None, request_metadata: dict[str, Any] | None = None) -> None:
         """Save new-turn messages into session, splitting into display/LLM/trace roles.
 
         Roles written to session.messages:
@@ -529,6 +529,11 @@ class AgentLoop:
                         continue
                     entry["content"] = filtered
                 entry["turn"] = turn
+                # Attach request metadata (files, etc.) to the user message
+                # so the frontend can display attachments in chat history.
+                if request_metadata:
+                    entry["metadata"] = request_metadata
+                    request_metadata = None  # only attach to the first user message
                 display_count += 1
 
             # --- Assistant with tool_calls (intermediate, LLM context only) ---

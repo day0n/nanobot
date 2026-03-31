@@ -29,6 +29,7 @@ class StoredMessageDoc(BaseModel):
     tool_hints: list[str] | None = None
     thinking_blocks: list[dict[str, Any]] | None = None
     reasoning_content: str | None = None
+    metadata: dict[str, Any] | None = None
     created_at: str | None = None
 
 
