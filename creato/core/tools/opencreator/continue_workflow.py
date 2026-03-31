@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from loguru import logger
@@ -17,7 +18,10 @@ class ContinueWorkflowTool(Tool):
     description = (
         "Continue a paused workflow after the user has chosen which output to use. "
         "Call get_workflow_results first to see the available outputs for the paused node, "
-        "then pass the node_id and the 1-based index of the chosen output."
+        "then pass the node_id and the 1-based indices of the chosen outputs.\n"
+        "- Multi-model node (e.g. 2 models): pass selected_indices=[1] to pick the first model's output.\n"
+        "- Text splitter node (splitText): pass selected_indices=[1,2,3] to pick segments, "
+        "or omit selected_indices to use ALL segments."
     )
     parameters = {
         "type": "object",
@@ -38,16 +42,17 @@ class ContinueWorkflowTool(Tool):
                 "type": "string",
                 "description": "The node_id of the paused select node.",
             },
-            "selected_index": {
-                "type": "integer",
+            "selected_indices": {
+                "type": "array",
+                "items": {"type": "integer"},
                 "description": (
-                    "1-based index of the output to use. "
-                    "For example, if get_workflow_results shows 2 outputs "
-                    "and the user picks the first one, pass 1."
+                    "1-based indices of the outputs to use. "
+                    "For multi-model nodes pass one index (e.g. [1]). "
+                    "For splitText nodes pass multiple (e.g. [1,2,3]) or omit to select all."
                 ),
             },
         },
-        "required": ["flow_task_id", "flow_run_id", "ws_id", "node_id", "selected_index"],
+        "required": ["flow_task_id", "flow_run_id", "ws_id", "node_id"],
     }
 
     def __init__(self, workflow_engine: Any = None, workflow_dao: Any = None):
@@ -60,7 +65,7 @@ class ContinueWorkflowTool(Tool):
         flow_run_id: str = "",
         ws_id: str = "",
         node_id: str = "",
-        selected_index: int = 0,
+        selected_indices: list[int] | None = None,
         **_: Any,
     ) -> str | WorkflowExecution:
         from creato.workflow.event_bridge import register, unregister
@@ -73,18 +78,14 @@ class ContinueWorkflowTool(Tool):
             return "Error: workflow engine is not configured on this server."
         if not self._dao:
             return "Error: workflow data access is not configured."
-
         if not flow_task_id or not flow_run_id or not ws_id:
             return "Error: flow_task_id, flow_run_id, and ws_id are all required."
         if not node_id:
             return "Error: node_id is required."
-        if selected_index < 1:
-            return "Error: selected_index must be >= 1."
-
-        # ── Build user_selection from MongoDB results ──────────────────
         if not flow_id or not user_id:
             return "Error: no flow_id or user_id in context."
 
+        # ── Fetch results from MongoDB ─────────────────────────────────
         try:
             results_data = await self._dao.get_node_results(
                 workflow_id=flow_id,
@@ -98,27 +99,44 @@ class ContinueWorkflowTool(Tool):
         if not node_runs:
             return f"Error: no results found for node {node_id}."
 
-        outputs = node_runs[0].get("outputs", [])
-        if not outputs:
+        raw_outputs = node_runs[0].get("outputs", [])
+        if not raw_outputs:
             return f"Error: node {node_id} has no outputs."
 
-        if selected_index > len(outputs):
-            return (
-                f"Error: selected_index {selected_index} out of range "
-                f"(1–{len(outputs)})."
-            )
+        # ── Expand splitText segments ──────────────────────────────────
+        expanded = _expand_outputs(raw_outputs)
 
-        selected = outputs[selected_index - 1]
-        output_type = selected.get("type", "text")
+        # ── Select outputs ─────────────────────────────────────────────
+        if selected_indices is None:
+            # Default: select all (typical for splitText)
+            chosen = expanded
+        else:
+            if any(i < 1 or i > len(expanded) for i in selected_indices):
+                return (
+                    f"Error: selected_indices out of range "
+                    f"(valid: 1–{len(expanded)}, got: {selected_indices})."
+                )
+            chosen = [expanded[i - 1] for i in selected_indices]
+
+        if not chosen:
+            return "Error: no outputs selected."
+
+        # ── Build user_selection ───────────────────────────────────────
+        # Frontend normalises splitText → text as the selection key
+        output_type = chosen[0].get("type", "text")
+        selection_key = "text" if output_type == "splitText" else output_type
 
         user_selection = {
-            output_type: [{
+            selection_key: [{
                 "node_id": node_id,
-                "outputs": [{
-                    "model": selected.get("model", ""),
-                    "output": selected.get("output", ""),
-                    "path": selected.get("path", ""),
-                }],
+                "outputs": [
+                    {
+                        "model": item.get("model", ""),
+                        "output": item.get("output", ""),
+                        "path": item.get("path", ""),
+                    }
+                    for item in chosen
+                ],
             }],
         }
 
@@ -147,7 +165,10 @@ class ContinueWorkflowTool(Tool):
                     et = event.get("event_type")
                     if et in ("finish_flow", "flow_killed", "node_time_out"):
                         _terminal_seen = True
-                    if et == "node_status" and event.get("status") in ("select", "failed"):
+                    if et == "node_status" and event.get("status") in (
+                        "select",
+                        "failed",
+                    ):
                         _terminal_seen = True
                     yield event
                     if _terminal_seen:
@@ -181,3 +202,38 @@ class ContinueWorkflowTool(Tool):
             ws_id=ws_id,
             event_stream=_event_stream(),
         )
+
+
+def _expand_outputs(outputs: list[dict]) -> list[dict]:
+    """Expand splitText results so each segment is a separate entry.
+
+    A splitText node stores all segments in a single result document:
+    - ``formatted_output``: ``["seg1", "seg2", ...]``  (preferred)
+    - ``output``: JSON-encoded array string as fallback
+
+    Regular (non-split) outputs pass through unchanged.
+    """
+    expanded: list[dict] = []
+    for out in outputs:
+        if out.get("type") != "splitText":
+            expanded.append(out)
+            continue
+
+        segments = out.get("formatted_output")
+        if not isinstance(segments, list):
+            raw = out.get("output", "")
+            try:
+                segments = json.loads(raw) if raw.startswith("[") else None
+            except (json.JSONDecodeError, TypeError):
+                segments = None
+
+        if isinstance(segments, list) and len(segments) > 1:
+            for seg in segments:
+                expanded.append({
+                    **{k: v for k, v in out.items()
+                       if k not in ("output", "formatted_output")},
+                    "output": seg if isinstance(seg, str) else str(seg),
+                })
+        else:
+            expanded.append(out)
+    return expanded

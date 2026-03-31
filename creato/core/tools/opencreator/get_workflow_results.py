@@ -82,17 +82,26 @@ class GetWorkflowResultsTool(Tool):
             outputs = latest_run.get("outputs", [])
             run_id = latest_run.get("run_id", "")
 
+            # Expand outputs: splitText results store multiple segments in one
+            # document (formatted_output list or JSON-encoded output string).
+            # Flatten them so each segment gets its own index for selection.
+            expanded = _expand_outputs(outputs)
+
             output_summary = []
-            for out in outputs:
+            for idx, out in enumerate(expanded, 1):
                 entry = {
+                    "index": idx,
                     "type": out.get("type", "unknown"),
                     "model": out.get("model", ""),
                     "status": out.get("status", ""),
                 }
-                # For text, include content preview; for media, include CDN URL
-                if out.get("type") == "text":
+                # For text / splitText, include content preview;
+                # for media, include CDN URL
+                if out.get("type") in ("text", "splitText"):
                     content = out.get("output", "")
-                    entry["content_preview"] = content[:200] + "..." if len(content) > 200 else content
+                    entry["content_preview"] = (
+                        content[:200] + "..." if len(content) > 200 else content
+                    )
                 else:
                     entry["output_url"] = out.get("output", "")
                 output_summary.append(entry)
@@ -100,7 +109,7 @@ class GetWorkflowResultsTool(Tool):
             summary[node_id] = {
                 "has_results": True,
                 "run_id": run_id,
-                "output_count": len(outputs),
+                "output_count": len(expanded),
                 "outputs": output_summary,
             }
 
@@ -119,3 +128,41 @@ class GetWorkflowResultsTool(Tool):
         }
 
         return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def _expand_outputs(outputs: list[dict]) -> list[dict]:
+    """Expand splitText results so each segment is a separate entry.
+
+    A splitText node stores all segments in a single result document:
+    - ``formatted_output``: ``["seg1", "seg2", ...]``  (preferred)
+    - ``output``: JSON-encoded array string as fallback
+
+    Regular (non-split) outputs pass through unchanged.
+    """
+    expanded: list[dict] = []
+    for out in outputs:
+        if out.get("type") != "splitText":
+            expanded.append(out)
+            continue
+
+        # Try formatted_output first, then parse output JSON string
+        segments = out.get("formatted_output")
+        if not isinstance(segments, list):
+            raw = out.get("output", "")
+            try:
+                segments = json.loads(raw) if raw.startswith("[") else None
+            except (json.JSONDecodeError, TypeError):
+                segments = None
+
+        if isinstance(segments, list) and len(segments) > 1:
+            # Expand: one entry per segment, inherit model/status/type
+            for seg in segments:
+                expanded.append({
+                    **{k: v for k, v in out.items()
+                       if k not in ("output", "formatted_output")},
+                    "output": seg if isinstance(seg, str) else str(seg),
+                })
+        else:
+            # Single segment or unparseable — keep as-is
+            expanded.append(out)
+    return expanded
