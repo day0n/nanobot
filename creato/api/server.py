@@ -192,6 +192,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             ))
             app.state.agent.tools.register(ContinueWorkflowTool(
                 workflow_engine=app.state.workflow_engine,
+                workflow_dao=workflow_dao,
             ))
             # Tool definitions are passed to the LLM on each call, so the model
             # discovers new tools automatically. But the system prompt also lists
