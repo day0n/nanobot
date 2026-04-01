@@ -73,5 +73,12 @@ class ToolRegistry:
     def __len__(self) -> int:
         return len(self._tools)
 
+    def __iter__(self):
+        return iter(self._tools.values())
+
     def __contains__(self, name: str) -> bool:
         return name in self._tools
+
+    def get_by_protocol(self, protocol_type: type) -> list[Tool]:
+        """Return all registered tools that are instances of the given protocol/mixin."""
+        return [t for t in self._tools.values() if isinstance(t, protocol_type)]

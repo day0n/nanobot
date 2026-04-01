@@ -27,13 +27,13 @@ from creato.core.request_context import (
     reset_request_context,
     set_request_context,
 )
-from creato.core.tools.base import Tool
+from creato.core.tools.base import ProgressAware, Tool
 
 if __name__ != "__main__":
     from creato.core.profile import AgentProfile, ProfileRegistry
 
 
-class SubagentTool(Tool):
+class SubagentTool(Tool, ProgressAware):
     """Tool that spawns a child agent with isolated tools and skills.
 
     Delegates all assembly logic to AgentFactory.build() — this tool

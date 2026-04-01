@@ -1,7 +1,7 @@
 """Base class for agent tools."""
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,18 +10,67 @@ from creato.schemas.tools import ToolResult  # noqa: F401 — re-exported for ba
 
 @dataclass(slots=True)
 class WorkflowExecution:
-    """Return type for RunWorkflowTool — carries an async event stream.
+    """Return type for workflow tools — carries an async event stream.
 
-    The agent loop consumes ``event_stream``, emits ``workflow.*`` SSE events
-    for each Consumer event, and feeds ``content`` back to the LLM when the
-    stream ends (finish/select/kill).
+    The executor consumes ``event_stream`` and delegates all interpretation
+    to the callbacks provided by the tool:
+
+    - ``interpret_event``: decides when to terminate and what string to
+      return to the LLM.  ``finish_flow``/``flow_killed`` are NOT handled
+      here — the ``event_stream`` generator breaks on those, and the
+      executor falls back to ``default_result``.
+    - ``make_sse_event``: converts raw Consumer events into AgentEvents
+      for SSE forwarding.
     """
 
     flow_task_id: str
     run_id: str
     ws_id: str
     event_stream: AsyncGenerator[dict[str, Any], None]
-    content: str = ""  # populated by loop after stream ends
+
+    interpret_event: Callable[[dict[str, Any]], str | None] | None = None
+    """Process each raw event. Return a string to terminate the stream
+    (that string becomes the tool result for the LLM). Return None to
+    keep consuming."""
+
+    make_sse_event: Callable[[dict[str, Any]], Any | None] | None = None
+    """Convert a raw Consumer event into an AgentEvent for SSE.
+    Return None to skip the event."""
+
+    default_result: str = "Workflow completed successfully"
+    """Result returned to the LLM when the event stream ends normally
+    (finish_flow break) without interpret_event producing a termination."""
+
+    timeout_result: str = (
+        "The workflow is still generating and may take a bit longer. "
+        "Results will be saved automatically to your assets — nothing "
+        "will be lost. You can leave or refresh the page, and check "
+        "the assets page later. If generation fails, you will not be charged."
+    )
+    """Result returned to the LLM when the 8-minute event stream timeout fires."""
+
+
+class TurnAware:
+    """Mixin for tools that need per-turn lifecycle."""
+
+    def on_turn_start(self) -> None:
+        """Called before each agent turn begins."""
+
+    def on_turn_end(self) -> bool:
+        """Called after each agent turn. Return True if tool already handled the response."""
+        return False
+
+
+class ContextAware:
+    """Mixin for tools that need message routing context."""
+
+    def set_routing_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None: ...
+
+
+class ProgressAware:
+    """Mixin for tools that need a progress callback."""
+
+    def set_progress(self, callback: Any) -> None: ...
 
 
 class Tool(ABC):

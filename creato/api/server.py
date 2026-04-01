@@ -50,7 +50,7 @@ class ChatRequest(BaseModel):
     stream: bool = True  # default true for backwards compat
 
 
-class AbortRequest(BaseModel):
+class StopRequest(BaseModel):
     session_id: str
 
 
@@ -423,7 +423,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
 
     @app.post("/api/v1/agent/chat/stop")
     async def stop_chat(
-        body: AbortRequest,
+        body: StopRequest,
         authorization: str | None = Header(default=None),
     ):
         _authenticate_agent_request(authorization, cfg)

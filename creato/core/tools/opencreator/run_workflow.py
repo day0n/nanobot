@@ -133,18 +133,29 @@ class RunWorkflowTool(Tool):
                 # Don't kill — let Consumer finish in background.
                 # Results will be saved to assets automatically.
                 logger.info(f"RunWorkflowTool: 8min timeout, disconnecting SSE (not killing). {flow_task_id=}")
-            except (asyncio.CancelledError, GeneratorExit):
+            except asyncio.CancelledError:
                 if not _terminal_seen:
                     await self._engine.kill(flow_task_id)
-                    logger.info(f"RunWorkflowTool: stream cancelled, killed workflow. {flow_task_id=}")
+                    logger.info(f"RunWorkflowTool: task cancelled, killed workflow. {flow_task_id=}")
+                else:
+                    logger.debug(f"RunWorkflowTool: task cancelled after terminal event, no kill needed. {flow_task_id=}")
+                raise  # Re-raise so task cancellation propagates through the agent loop
+            except GeneratorExit:
+                if not _terminal_seen:
+                    await self._engine.kill(flow_task_id)
+                    logger.info(f"RunWorkflowTool: stream closed, killed workflow. {flow_task_id=}")
                 else:
                     logger.debug(f"RunWorkflowTool: stream closed after terminal event, no kill needed. {flow_task_id=}")
             finally:
                 unregister(ws_id)
+
+        from ._workflow_callbacks import build_interpret_event, build_make_sse_event
 
         return WorkflowExecution(
             flow_task_id=flow_task_id,
             run_id=flow_run_id,
             ws_id=ws_id,
             event_stream=_event_stream(),
+            interpret_event=build_interpret_event(flow_task_id, flow_run_id, ws_id),
+            make_sse_event=build_make_sse_event(),
         )

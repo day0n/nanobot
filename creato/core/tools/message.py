@@ -2,11 +2,11 @@
 
 from typing import Any, Awaitable, Callable
 
-from creato.core.tools.base import Tool
+from creato.core.tools.base import ContextAware, Tool, TurnAware
 from creato.bus.events import OutboundMessage
 
 
-class MessageTool(Tool):
+class MessageTool(Tool, TurnAware, ContextAware):
     """Tool to send messages to users on chat channels."""
 
     def __init__(
@@ -22,7 +22,7 @@ class MessageTool(Tool):
         self._default_message_id = default_message_id
         self._sent_in_turn: bool = False
 
-    def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def set_routing_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Set the current message context."""
         self._default_channel = channel
         self._default_chat_id = chat_id
@@ -32,9 +32,13 @@ class MessageTool(Tool):
         """Set the callback for sending messages."""
         self._send_callback = callback
 
-    def start_turn(self) -> None:
+    def on_turn_start(self) -> None:
         """Reset per-turn send tracking."""
         self._sent_in_turn = False
+
+    def on_turn_end(self) -> bool:
+        """Return True if tool already sent a message this turn."""
+        return self._sent_in_turn
 
     @property
     def name(self) -> str:

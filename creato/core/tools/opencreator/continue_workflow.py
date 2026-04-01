@@ -197,11 +197,15 @@ class ContinueWorkflowTool(Tool):
             finally:
                 unregister(ws_id)
 
+        from ._workflow_callbacks import build_interpret_event, build_make_sse_event
+
         return WorkflowExecution(
             flow_task_id=flow_task_id,
             run_id=flow_run_id,
             ws_id=ws_id,
             event_stream=_event_stream(),
+            interpret_event=build_interpret_event(flow_task_id, flow_run_id, ws_id),
+            make_sse_event=build_make_sse_event(),
         )
 
 

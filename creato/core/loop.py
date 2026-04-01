@@ -30,7 +30,6 @@ from creato.core.prompt import PromptBuilder
 from creato.core.prompt.runtime import RUNTIME_CONTEXT_TAG
 from creato.core.events import (
     AgentEvent,
-    WORKFLOW_EVENT_MAP,
     message_delta,
     step_completed,
     step_started,
@@ -38,7 +37,6 @@ from creato.core.events import (
     tool_event,
     tool_failed,
     tool_started,
-    workflow_paused,
     workflow_started,
 )
 from creato.core.request_context import reset_request_context, set_request_context
@@ -46,8 +44,7 @@ from creato.core.memory import MemoryProvider
 from creato.core.executor import AgentExecutor, ExecutorHooks
 from creato.core.profile import AgentProfile, AgentContext, ProfileRegistry
 from creato.core.factory import AgentFactory
-from creato.core.tools.base import Tool
-from creato.core.tools.message import MessageTool
+from creato.core.tools.base import ContextAware, ProgressAware, Tool, TurnAware
 from creato.core.tools.registry import ToolRegistry
 from creato.bus.events import InboundMessage, OutboundMessage
 from creato.providers.base import LLMProvider
@@ -148,9 +145,8 @@ class AgentLoop:
 
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None, session_key: str | None = None) -> None:
         """Update context for all tools that need routing info."""
-        if tool := self.tools.get("message"):
-            if hasattr(tool, "set_context"):
-                tool.set_context(channel, chat_id, *([message_id] if message_id else []))
+        for tool in self.tools.get_by_protocol(ContextAware):
+            tool.set_routing_context(channel, chat_id, message_id)
 
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
@@ -169,10 +165,9 @@ class AgentLoop:
         on_progress: Callable[[AgentEvent], Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str], list[dict], dict[str, dict]]:
         """Run the agent iteration loop via AgentExecutor."""
-        # Wire up progress callback to SubagentTool so child events reach SSE
-        _sa_tool = self.tools.get("subagent")
-        if _sa_tool and hasattr(_sa_tool, "set_progress"):
-            _sa_tool.set_progress(on_progress)
+        # Wire up progress callback to tools that need it
+        for tool in self.tools.get_by_protocol(ProgressAware):
+            tool.set_progress(on_progress)
 
         hooks = self._build_hooks(on_progress)
 
@@ -234,16 +229,10 @@ class AgentLoop:
             if on_progress:
                 await on_progress(workflow_started(data))
 
-        async def _on_workflow_event(raw_event: dict) -> None:
-            if on_progress:
-                et = raw_event.get("event_type")
-                constructor = WORKFLOW_EVENT_MAP.get(et)
-                if constructor:
-                    await on_progress(constructor(raw_event))
-
-        async def _on_workflow_paused(data: dict) -> None:
-            if on_progress:
-                await on_progress(workflow_paused(data))
+        async def _on_workflow_event(sse_event: Any) -> None:
+            """Forward tool-produced AgentEvent directly to SSE."""
+            if on_progress and sse_event:
+                await on_progress(sse_event)
 
         return ExecutorHooks(
             on_step_start=_on_step_start,
@@ -254,7 +243,6 @@ class AgentLoop:
             on_tool_event=_on_tool_event,
             on_workflow_start=_on_workflow_start,
             on_workflow_event=_on_workflow_event,
-            on_workflow_paused=_on_workflow_paused,
         )
 
     async def _locked_process(self, msg: InboundMessage, *, session_key: str | None = None, **kwargs) -> OutboundMessage | None:
@@ -408,9 +396,8 @@ class AgentLoop:
                 )
 
             self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), session_key=key)
-            if message_tool := self.tools.get("message"):
-                if isinstance(message_tool, MessageTool):
-                    message_tool.start_turn()
+            for tool in self.tools.get_by_protocol(TurnAware):
+                tool.on_turn_start()
 
             full_history = session.get_history(max_messages=0)
             # Retrieve long-term memory before budget calculation so its size is included
@@ -449,7 +436,7 @@ class AgentLoop:
             self._maybe_generate_summary(session)
             self._store_memory_async(user_id, all_msgs, skip)
 
-            if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+            if any(t.on_turn_end() for t in self.tools.get_by_protocol(TurnAware)):
                 return None
 
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
@@ -556,10 +543,8 @@ class AgentLoop:
                 if isinstance(entry.get("content"), str):
                     session.last_message_preview = entry["content"][:120]
 
-            # --- Tool result (LLM context only, truncated) ---
+            # --- Tool result (LLM context only) ---
             elif role == "tool":
-                if isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
-                    entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
                 entry["turn"] = turn
 
                 # Build tool trace document
