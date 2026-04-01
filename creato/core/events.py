@@ -80,6 +80,8 @@ _WORKFLOW_COMPLETED = "workflow.completed"
 _WORKFLOW_NODE_FAILED = "workflow.node_failed"
 _WORKFLOW_FAILED = "workflow.failed"
 _WORKFLOW_KILLED = "workflow.killed"
+_WORKFLOW_SELECT_CARD = "workflow.select_card"
+_WORKFLOW_SELECTION_RESOLVED = "workflow.selection_resolved"
 
 _SUBAGENT_STARTED = "subagent.started"
 _SUBAGENT_COMPLETED = "subagent.completed"
@@ -183,6 +185,17 @@ def workflow_failed(data: dict[str, Any]) -> AgentEvent:
 
 def workflow_killed(data: dict[str, Any]) -> AgentEvent:
     return AgentEvent(event=_WORKFLOW_KILLED, data=data)
+
+
+def workflow_select_card(data: dict[str, Any]) -> AgentEvent:
+    """Emitted when a node enters SELECT — frontend shows a selection card.
+    Does NOT break the SSE stream."""
+    return AgentEvent(event=_WORKFLOW_SELECT_CARD, data=data)
+
+
+def workflow_selection_resolved(data: dict[str, Any]) -> AgentEvent:
+    """Emitted when a user resolves a SELECT via HTTP POST."""
+    return AgentEvent(event=_WORKFLOW_SELECTION_RESOLVED, data=data)
 
 
 # Consumer event_type → Agent SSE constructor

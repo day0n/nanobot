@@ -14,6 +14,8 @@ from creato.core.events import (
     AgentEvent,
     workflow_node_failed,
     workflow_paused,
+    workflow_select_card,
+    workflow_selection_resolved,
 )
 from creato.workflow.event_bridge import (
     store_paused_context,
@@ -107,23 +109,40 @@ def _analyze_failure(error_msg: str, error_code: str) -> dict[str, str]:
 
 # ---------------------------------------------------------------------------
 # Callback builders
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 
 def build_interpret_event(
     flow_task_id: str,
     run_id: str,
     ws_id: str,
+    stream_state: dict[str, Any] | None = None,
+    initial_paused_nodes: set[str] | None = None,
 ) -> Callable[[dict[str, Any]], str | None]:
     """Build an ``interpret_event`` callback for WorkflowExecution.
 
-    Handles abnormal terminations (select / failed / timeout).
-    Normal completion (finish_flow / flow_killed) returns a failure
-    summary if any nodes failed, otherwise returns None so the executor
-    falls back to ``WorkflowExecution.default_result``.
+    Tracks running_count to detect when all parallel branches have settled.
+    SELECT no longer terminates the stream — it accumulates paused nodes.
+    The stream only breaks when running_count == 0 AND there are unresolved
+    paused nodes.
 
-    Also captures node_outputs into the RunSnapshot for restart-based continue.
+    ``initial_paused_nodes`` allows inheriting paused state from a previous
+    turn (e.g. when continue_workflow is called after all-settled).
+
+    Also captures node_outputs into the RunSnapshot for continue.
     """
     failed_nodes: list[dict[str, Any]] = []
+    running_nodes: set[str] = set()  # track by node_id to prevent double-count
+    paused_nodes: set[str] = set(initial_paused_nodes) if initial_paused_nodes else set()
+
+    def _check_all_settled() -> str | None:
+        """Return pause message if all branches have settled, else None."""
+        if not running_nodes and paused_nodes:
+            if stream_state is not None:
+                stream_state["select_paused"] = True
+            return _build_all_settled_message(
+                flow_task_id, run_id, ws_id, paused_nodes, failed_nodes,
+            )
+        return None
 
     def interpret_event(raw_event: dict[str, Any]) -> str | None:
         et = raw_event.get("event_type")
@@ -132,56 +151,57 @@ def build_interpret_event(
         if et == "start_flow" and raw_event.get("run_id"):
             update_snapshot_consumer_run_id(flow_task_id, raw_event["run_id"])
 
-        # ── Capture node outputs into RunSnapshot ──────────────────
-        if et == "node_status" and raw_event.get("status") == "success":
-            _capture_node_outputs(flow_task_id, raw_event)
-
-        # select → capture outputs + pause, return control to LLM
-        if et == "node_status" and raw_event.get("status") == "select":
+        # ── node_status events ────────────────────────────────────────
+        if et == "node_status":
+            status = raw_event.get("status")
             node_id = raw_event.get("node_id", "unknown")
-            _capture_node_outputs(flow_task_id, raw_event)
-            update_snapshot_paused_node(flow_task_id, node_id)
-            # Legacy compat
-            store_paused_context(flow_task_id, {
-                "flow_run_id": run_id,
-                "ws_id": ws_id,
-                "node_id": node_id,
-            })
-            pause_msg = (
-                f"Workflow paused: node {node_id} entered select mode — "
-                f"it produced multiple outputs and the downstream node needs "
-                f"the user to choose which result to use.\n"
-                f"Paused workflow context: flow_task_id={flow_task_id}, "
-                f"flow_run_id={run_id}, ws_id={ws_id}\n"
-                f"Next step: call get_workflow_results to see the available "
-                f"outputs, then present the choices to the user."
-            )
-            if failed_nodes:
-                pause_msg += (
-                    f"\n\nNote: {len(failed_nodes)} node(s) failed during this run:\n"
-                    + _build_failure_summary(failed_nodes)
-                )
-            return pause_msg
 
-        # node failed → accumulate, keep consuming
-        if et == "node_status" and raw_event.get("status") == "failed":
-            failed_nodes.append({
-                "node_id": raw_event.get("node_id", "unknown"),
-                "error_msg": raw_event.get("error_msg", ""),
-                "error_code": str(raw_event.get("error_code", "")),
-            })
-            return None
+            if status == "running":
+                running_nodes.add(node_id)
 
-        # node timed out → accumulate, keep consuming
+            elif status == "success":
+                running_nodes.discard(node_id)
+                _capture_node_outputs(flow_task_id, raw_event)
+
+            elif status == "select":
+                running_nodes.discard(node_id)
+                _capture_node_outputs(flow_task_id, raw_event)
+                update_snapshot_paused_node(flow_task_id, node_id)
+                paused_nodes.add(node_id)
+                # Legacy compat
+                store_paused_context(flow_task_id, {
+                    "flow_run_id": run_id,
+                    "ws_id": ws_id,
+                    "node_id": node_id,
+                })
+                # DO NOT return — keep consuming. make_sse_event emits the card.
+
+            elif status == "failed":
+                running_nodes.discard(node_id)
+                failed_nodes.append({
+                    "node_id": node_id,
+                    "error_msg": raw_event.get("error_msg", ""),
+                    "error_code": str(raw_event.get("error_code", "")),
+                })
+
+            return _check_all_settled()
+
+        # ── node timed out ────────────────────────────────────────────
         if et == "node_time_out":
+            running_nodes.discard(raw_event.get("node_id", "unknown"))
             failed_nodes.append({
                 "node_id": raw_event.get("node_id", "unknown"),
                 "error_msg": "Node execution timed out",
                 "error_code": "TIMEOUT",
             })
+            return _check_all_settled()
+
+        # ── Synthetic: selection resolved via HTTP POST ────────────────
+        if et == "_selection_resolved":
+            paused_nodes.discard(raw_event.get("node_id"))
             return None
 
-        # workflow ended → return summary if there were failures
+        # ── workflow ended ────────────────────────────────────────────
         if et in ("finish_flow", "flow_killed"):
             if failed_nodes:
                 return _build_failure_summary(failed_nodes)
@@ -221,15 +241,57 @@ def _build_failure_summary(failed_nodes: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def _build_all_settled_message(
+    flow_task_id: str,
+    run_id: str,
+    ws_id: str,
+    paused_nodes: set[str],
+    failed_nodes: list[dict[str, Any]],
+) -> str:
+    """Build pause message when all branches have settled (no running nodes)."""
+    node_list = ", ".join(sorted(paused_nodes))
+    msg = (
+        f"Workflow paused: {len(paused_nodes)} node(s) in select mode — {node_list}.\n"
+        f"Each produced multiple outputs and the downstream nodes need "
+        f"the user to choose which result to use.\n"
+        f"Paused workflow context: flow_task_id={flow_task_id}, "
+        f"flow_run_id={run_id}, ws_id={ws_id}\n"
+        f"Next step: call get_workflow_results to see the available "
+        f"outputs, then present the choices to the user."
+    )
+    if failed_nodes:
+        msg += (
+            f"\n\nNote: {len(failed_nodes)} node(s) failed during this run:\n"
+            + _build_failure_summary(failed_nodes)
+        )
+    return msg
+
+
 def build_make_sse_event() -> Callable[[dict[str, Any]], AgentEvent | None]:
     """Build ``make_sse_event`` callback that converts Consumer events to AgentEvents."""
 
     def make_sse_event(raw_event: dict[str, Any]) -> AgentEvent | None:
         et = raw_event.get("event_type")
 
-        # select node → emit workflow.paused SSE
+        # select node → emit workflow.select_card SSE (does NOT break stream)
         if et == "node_status" and raw_event.get("status") == "select":
-            return workflow_paused(raw_event)
+            node_id = raw_event.get("node_id", "")
+            card_data = {
+                **raw_event,
+                "card_info": {
+                    "node_id": node_id,
+                    "node_type": _extract_node_type(node_id),
+                    "explanation": (
+                        f"{_extract_node_type(node_id)} node produced multiple outputs. "
+                        f"Choose which to use."
+                    ),
+                },
+            }
+            return workflow_select_card(card_data)
+
+        # selection resolved via HTTP POST → notify frontend
+        if et == "_selection_resolved":
+            return workflow_selection_resolved(raw_event)
 
         # failed node → emit workflow.node_failed SSE with analysis
         if et == "node_status" and raw_event.get("status") == "failed":

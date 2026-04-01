@@ -49,6 +49,18 @@ def unregister(ws_id: str) -> None:
     _event_queues.pop(ws_id, None)
 
 
+def get_event_queue(ws_id: str) -> asyncio.Queue | None:
+    """Return the existing event queue for a ws_id, or None if not registered."""
+    entry = _event_queues.get(ws_id)
+    if entry is None:
+        return None
+    q, registered_at = entry
+    if time.monotonic() - registered_at > _TTL_SECONDS:
+        _event_queues.pop(ws_id, None)
+        return None
+    return q
+
+
 async def dispatch(ws_id: str, event: dict[str, Any]) -> bool:
     """Dispatch an event to the registered queue. Returns True if delivered."""
     entry = _event_queues.get(ws_id)
@@ -77,7 +89,7 @@ class RunSnapshot:
     nodes: list[dict]
     edges: list[dict]
     consumer_run_id: str = ""  # Real run_id from consumer's start_flow event
-    paused_node_id: str = ""
+    paused_node_ids: set[str] = field(default_factory=set)
     # node_id → raw node_outputs dict from events
     # e.g. {"text": {"node_id": "xxx", "outputs": [...]}}
     node_outputs: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -121,7 +133,14 @@ def update_snapshot_paused_node(flow_task_id: str, node_id: str) -> None:
     """Record which node entered select mode."""
     snap = _run_snapshots.get(flow_task_id)
     if snap:
-        snap.paused_node_id = node_id
+        snap.paused_node_ids.add(node_id)
+
+
+def resolve_snapshot_paused_node(flow_task_id: str, node_id: str) -> None:
+    """Remove a node from the paused set after user selects via HTTP."""
+    snap = _run_snapshots.get(flow_task_id)
+    if snap:
+        snap.paused_node_ids.discard(node_id)
 
 
 # ── Legacy compat (store_paused_context / get_paused_context) ─────
@@ -129,9 +148,12 @@ def update_snapshot_paused_node(flow_task_id: str, node_id: str) -> None:
 
 def store_paused_context(flow_task_id: str, ctx: dict[str, str]) -> None:
     """Legacy: store minimal paused context. Prefer RunSnapshot."""
+    node_id = ctx.get("node_id", "")
+    if not node_id:
+        return
     snap = _run_snapshots.get(flow_task_id)
     if snap:
-        snap.paused_node_id = ctx.get("node_id", "")
+        snap.paused_node_ids.add(node_id)
     else:
         # Fallback: create a minimal snapshot
         _run_snapshots[flow_task_id] = RunSnapshot(
@@ -139,16 +161,16 @@ def store_paused_context(flow_task_id: str, ctx: dict[str, str]) -> None:
             ws_id=ctx.get("ws_id", ""),
             nodes=[],
             edges=[],
-            paused_node_id=ctx.get("node_id", ""),
+            paused_node_ids={node_id},
         )
 
 
 def get_paused_context(flow_task_id: str) -> dict[str, str] | None:
     """Legacy: retrieve paused context from snapshot (does NOT delete)."""
     snap = _run_snapshots.get(flow_task_id)
-    if not snap or not snap.paused_node_id:
+    if not snap or not snap.paused_node_ids:
         return None
     return {
         "ws_id": snap.ws_id,
-        "node_id": snap.paused_node_id,
+        "node_id": next(iter(snap.paused_node_ids)),
     }

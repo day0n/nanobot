@@ -121,41 +121,35 @@ class RunWorkflowTool(Tool):
         ))
 
         # 5. Return WorkflowExecution — loop.py will consume the event stream
+        _stream_state: dict[str, Any] = {"terminal_seen": False, "select_paused": False}
+
         async def _event_stream():
-            _terminal_seen = False  # Track whether workflow reached a natural end
             try:
                 import asyncio
                 while True:
                     event = await asyncio.wait_for(event_queue.get(), timeout=480)  # 8 minutes
                     et = event.get("event_type")
-                    # Mark terminal BEFORE yield — GeneratorExit arrives at the yield point,
-                    # so the flag must already be set by then.
                     if et in ("finish_flow", "flow_killed"):
-                        _terminal_seen = True
-                    if et == "node_status" and event.get("status") == "select":
-                        _terminal_seen = True
+                        _stream_state["terminal_seen"] = True
+                    # SELECT is no longer terminal — keep consuming
                     yield event
-                    if _terminal_seen:
+                    if _stream_state["terminal_seen"]:
                         break
             except asyncio.TimeoutError:
-                # Don't kill — let Consumer finish in background.
-                # Results will be saved to assets automatically.
                 logger.info(f"RunWorkflowTool: 8min timeout, disconnecting SSE (not killing). {flow_task_id=}")
             except asyncio.CancelledError:
-                if not _terminal_seen:
+                if not _stream_state["terminal_seen"] and not _stream_state["select_paused"]:
                     await self._engine.kill(flow_task_id)
                     logger.info(f"RunWorkflowTool: task cancelled, killed workflow. {flow_task_id=}")
-                else:
-                    logger.debug(f"RunWorkflowTool: task cancelled after terminal event, no kill needed. {flow_task_id=}")
-                raise  # Re-raise so task cancellation propagates through the agent loop
+                raise
             except GeneratorExit:
-                if not _terminal_seen:
+                if not _stream_state["terminal_seen"] and not _stream_state["select_paused"]:
                     await self._engine.kill(flow_task_id)
                     logger.info(f"RunWorkflowTool: stream closed, killed workflow. {flow_task_id=}")
-                else:
-                    logger.debug(f"RunWorkflowTool: stream closed after terminal event, no kill needed. {flow_task_id=}")
             finally:
-                unregister(ws_id)
+                if _stream_state["terminal_seen"]:
+                    unregister(ws_id)
+                # select_paused or timeout: do NOT unregister — queue stays for reuse
 
         from ._workflow_callbacks import build_interpret_event, build_make_sse_event
 
@@ -164,6 +158,6 @@ class RunWorkflowTool(Tool):
             run_id=flow_run_id,
             ws_id=ws_id,
             event_stream=_event_stream(),
-            interpret_event=build_interpret_event(flow_task_id, flow_run_id, ws_id),
+            interpret_event=build_interpret_event(flow_task_id, flow_run_id, ws_id, stream_state=_stream_state),
             make_sse_event=build_make_sse_event(),
         )

@@ -54,6 +54,12 @@ class StopRequest(BaseModel):
     session_id: str
 
 
+class WorkflowSelectRequest(BaseModel):
+    flow_task_id: str
+    node_id: str
+    selected_indices: list[int] | None = None
+
+
 # Track running agent tasks by session_id: (asyncio.Task, event queue)
 _running_tasks: dict[str, tuple[asyncio.Task, asyncio.Queue]] = {}
 
@@ -440,6 +446,93 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         task.cancel()
         _running_tasks.pop(body.session_id, None)
         return {"status": "stopped", "session_id": body.session_id}
+
+    # ---- POST /v1/agent/workflow/select — resolve a SELECT node via HTTP ----
+
+    @app.post("/v1/agent/workflow/select")
+    async def workflow_select(
+        body: WorkflowSelectRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        auth_user = _authenticate_agent_request(authorization, cfg)
+
+        from creato.workflow.event_bridge import (
+            get_run_snapshot,
+            get_event_queue,
+            resolve_snapshot_paused_node,
+        )
+        from creato.core.tools.opencreator.continue_workflow import (
+            _expand_outputs,
+            _build_user_selection,
+        )
+
+        # 1. Look up snapshot
+        snapshot = get_run_snapshot(body.flow_task_id)
+        if not snapshot:
+            raise HTTPException(404, "No run snapshot for this flow_task_id")
+
+        consumer_run_id = snapshot.consumer_run_id
+        ws_id = snapshot.ws_id
+        if not consumer_run_id:
+            raise HTTPException(400, "Consumer run_id not captured yet")
+
+        # 2. Validate node is still paused
+        if body.node_id not in snapshot.paused_node_ids:
+            raise HTTPException(400, f"Node {body.node_id} is not in select mode")
+
+        # 3. Get paused node outputs
+        paused_outputs = snapshot.node_outputs.get(body.node_id)
+        if not paused_outputs:
+            raise HTTPException(400, f"No outputs for node {body.node_id}")
+
+        # 3. Expand + select by indices
+        expanded = _expand_outputs(paused_outputs)
+        if body.selected_indices is None:
+            chosen = expanded
+        else:
+            if any(i < 1 or i > len(expanded) for i in body.selected_indices):
+                raise HTTPException(400, f"Indices out of range (1-{len(expanded)})")
+            chosen = [expanded[i - 1] for i in body.selected_indices]
+
+        if not chosen:
+            raise HTTPException(400, "No outputs selected")
+
+        # 4. Build user_selection and submit continue
+        user_selection = _build_user_selection(body.node_id, chosen)
+
+        if not workflow_engine:
+            raise HTTPException(500, "Workflow engine not configured")
+
+        try:
+            await workflow_engine.submit_continue(
+                flow_task_id=body.flow_task_id,
+                flow_run_id=consumer_run_id,
+                ws_id=ws_id,
+                user_id=auth_user.user_id,
+                user_selection=user_selection,
+            )
+        except Exception as e:
+            raise HTTPException(500, f"Failed to continue workflow: {e}")
+
+        # 5. Resolve paused node in snapshot
+        resolve_snapshot_paused_node(body.flow_task_id, body.node_id)
+
+        # 6. Inject synthetic event into the live event queue
+        event_queue = get_event_queue(ws_id)
+        sse_active = event_queue is not None
+        if sse_active:
+            await event_queue.put({
+                "event_type": "_selection_resolved",
+                "node_id": body.node_id,
+            })
+
+        return {
+            "status": "ok",
+            "node_id": body.node_id,
+            "sse_active": sse_active,
+            # If sse_active=false, results will arrive in the next chat turn
+            # when the agent calls continue_workflow.
+        }
 
     # ---- GET /v1/agent/sessions — lazy-loaded session list ----
     # Supports two modes:

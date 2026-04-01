@@ -62,7 +62,7 @@ class ContinueWorkflowTool(Tool):
         selected_indices: list[int] | None = None,
         **_: Any,
     ) -> str | WorkflowExecution:
-        from creato.workflow.event_bridge import register, unregister, get_run_snapshot
+        from creato.workflow.event_bridge import get_run_snapshot
 
         request_context = get_request_context()
         user_id = request_context.get("user_id")
@@ -89,7 +89,14 @@ class ContinueWorkflowTool(Tool):
         if not ws_id:
             return "Error: ws_id not found in snapshot."
 
-        # ── 2. Get paused node outputs from snapshot ───────────────────
+        # ── 2. Validate node is still paused ─────────────────────────
+        if node_id not in snapshot.paused_node_ids:
+            return (
+                f"Error: node {node_id} is not in select mode. "
+                "It may have already been resolved."
+            )
+
+        # ── 3. Get paused node outputs from snapshot ───────────────────
         paused_outputs = snapshot.node_outputs.get(node_id)
         if not paused_outputs:
             return (
@@ -115,8 +122,14 @@ class ContinueWorkflowTool(Tool):
         # ── 4. Build user_selection ────────────────────────────────────
         user_selection = _build_user_selection(node_id, chosen)
 
-        # ── 5. Register event queue and submit continue ────────────────
-        event_queue = register(ws_id)
+        # ── 5. Reuse existing event queue or register new one ─────────
+        from creato.workflow.event_bridge import (
+            register, unregister, get_event_queue, resolve_snapshot_paused_node,
+        )
+
+        event_queue = get_event_queue(ws_id)
+        if event_queue is None:
+            event_queue = register(ws_id)
 
         try:
             await self._engine.submit_continue(
@@ -127,8 +140,10 @@ class ContinueWorkflowTool(Tool):
                 user_selection=user_selection,
             )
         except Exception as e:
-            unregister(ws_id)
             return f"Error: failed to continue workflow — {e}"
+
+        # ── 5b. Remove this node from paused set ──────────────────────
+        resolve_snapshot_paused_node(flow_task_id, node_id)
 
         logger.info(
             f"ContinueWorkflowTool: submitted continue for {flow_task_id}, "
@@ -136,19 +151,19 @@ class ContinueWorkflowTool(Tool):
         )
 
         # ── 6. Return WorkflowExecution ────────────────────────────────
+        _stream_state: dict[str, Any] = {"terminal_seen": False, "select_paused": False}
+
         async def _event_stream():
-            _terminal_seen = False
             try:
                 import asyncio
                 while True:
                     event = await asyncio.wait_for(event_queue.get(), timeout=480)
                     et = event.get("event_type")
                     if et in ("finish_flow", "flow_killed"):
-                        _terminal_seen = True
-                    if et == "node_status" and event.get("status") == "select":
-                        _terminal_seen = True
+                        _stream_state["terminal_seen"] = True
+                    # SELECT is no longer terminal — keep consuming
                     yield event
-                    if _terminal_seen:
+                    if _stream_state["terminal_seen"]:
                         break
             except asyncio.TimeoutError:
                 logger.info(
@@ -157,18 +172,18 @@ class ContinueWorkflowTool(Tool):
                     flow_task_id,
                 )
             except asyncio.CancelledError:
-                if not _terminal_seen:
+                if not _stream_state["terminal_seen"] and not _stream_state["select_paused"]:
                     await self._engine.kill(flow_task_id)
                     logger.info(f"ContinueWorkflowTool: task cancelled, killed workflow. {flow_task_id=}")
                 raise
             except GeneratorExit:
-                if not _terminal_seen:
+                if not _stream_state["terminal_seen"] and not _stream_state["select_paused"]:
                     await self._engine.kill(flow_task_id)
                     logger.info(f"ContinueWorkflowTool: stream closed, killed workflow. {flow_task_id=}")
-                else:
-                    logger.debug(f"ContinueWorkflowTool: stream closed after terminal, no kill. {flow_task_id=}")
             finally:
-                unregister(ws_id)
+                if _stream_state["terminal_seen"]:
+                    unregister(ws_id)
+                # select_paused or timeout: do NOT unregister — queue stays for reuse
 
         from ._workflow_callbacks import build_interpret_event, build_make_sse_event
 
@@ -177,7 +192,11 @@ class ContinueWorkflowTool(Tool):
             run_id=consumer_run_id,
             ws_id=ws_id,
             event_stream=_event_stream(),
-            interpret_event=build_interpret_event(flow_task_id, consumer_run_id, ws_id),
+            interpret_event=build_interpret_event(
+                flow_task_id, consumer_run_id, ws_id,
+                stream_state=_stream_state,
+                initial_paused_nodes=snapshot.paused_node_ids,
+            ),
             make_sse_event=build_make_sse_event(),
         )
 
