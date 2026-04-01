@@ -77,6 +77,7 @@ _WORKFLOW_MODEL_READY = "workflow.model_ready"
 _WORKFLOW_MODEL_STATUS = "workflow.model_status"
 _WORKFLOW_PAUSED = "workflow.paused"
 _WORKFLOW_COMPLETED = "workflow.completed"
+_WORKFLOW_NODE_FAILED = "workflow.node_failed"
 _WORKFLOW_FAILED = "workflow.failed"
 _WORKFLOW_KILLED = "workflow.killed"
 
@@ -173,6 +174,9 @@ def workflow_paused(data: dict[str, Any]) -> AgentEvent:
 
 def workflow_completed(data: dict[str, Any]) -> AgentEvent:
     return AgentEvent(event=_WORKFLOW_COMPLETED, data=data)
+
+def workflow_node_failed(data: dict[str, Any]) -> AgentEvent:
+    return AgentEvent(event=_WORKFLOW_NODE_FAILED, data=data)
 
 def workflow_failed(data: dict[str, Any]) -> AgentEvent:
     return AgentEvent(event=_WORKFLOW_FAILED, data=data)

@@ -164,12 +164,9 @@ class ContinueWorkflowTool(Tool):
                 while True:
                     event = await asyncio.wait_for(event_queue.get(), timeout=480)
                     et = event.get("event_type")
-                    if et in ("finish_flow", "flow_killed", "node_time_out"):
+                    if et in ("finish_flow", "flow_killed"):
                         _terminal_seen = True
-                    if et == "node_status" and event.get("status") in (
-                        "select",
-                        "failed",
-                    ):
+                    if et == "node_status" and event.get("status") == "select":
                         _terminal_seen = True
                     yield event
                     if _terminal_seen:
