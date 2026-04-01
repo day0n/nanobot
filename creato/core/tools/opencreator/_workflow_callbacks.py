@@ -129,7 +129,7 @@ def build_interpret_event(
                 "ws_id": ws_id,
                 "node_id": node_id,
             })
-            return (
+            pause_msg = (
                 f"Workflow paused: node {node_id} entered select mode — "
                 f"it produced multiple outputs and the downstream node needs "
                 f"the user to choose which result to use.\n"
@@ -138,6 +138,12 @@ def build_interpret_event(
                 f"Next step: call get_workflow_results to see the available "
                 f"outputs, then present the choices to the user."
             )
+            if failed_nodes:
+                pause_msg += (
+                    f"\n\nNote: {len(failed_nodes)} node(s) failed during this run:\n"
+                    + _build_failure_summary(failed_nodes)
+                )
+            return pause_msg
 
         # node failed → accumulate, keep consuming
         if et == "node_status" and raw_event.get("status") == "failed":
@@ -202,6 +208,14 @@ def build_make_sse_event() -> Callable[[dict[str, Any]], AgentEvent | None]:
         # failed node → emit workflow.node_failed SSE with analysis
         if et == "node_status" and raw_event.get("status") == "failed":
             return _build_node_failed_sse(raw_event)
+
+        # node timeout → also emit workflow.node_failed (workflow continues)
+        if et == "node_time_out":
+            return _build_node_failed_sse({
+                **raw_event,
+                "error_msg": raw_event.get("error_msg", "Node execution timed out"),
+                "error_code": raw_event.get("error_code", "TIMEOUT"),
+            })
 
         # all other mapped events
         constructor = WORKFLOW_EVENT_MAP.get(et)
