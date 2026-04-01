@@ -132,8 +132,9 @@ class ContinueWorkflowTool(Tool):
                 "outputs": [
                     {
                         "model": item.get("model", ""),
-                        "output": item.get("output", ""),
-                        "path": item.get("path", ""),
+                        # MongoDB stores content as "result", consumer expects "output"
+                        "output": item.get("result", "") or item.get("output", ""),
+                        "path": item.get("path") or [],
                     }
                     for item in chosen
                 ],
@@ -221,9 +222,9 @@ def _expand_outputs(outputs: list[dict]) -> list[dict]:
 
         segments = out.get("formatted_output")
         if not isinstance(segments, list):
-            raw = out.get("output", "")
+            raw = out.get("result", "") or out.get("output", "")
             try:
-                segments = json.loads(raw) if raw.startswith("[") else None
+                segments = json.loads(raw) if raw and raw.startswith("[") else None
             except (json.JSONDecodeError, TypeError):
                 segments = None
 
@@ -231,8 +232,8 @@ def _expand_outputs(outputs: list[dict]) -> list[dict]:
             for seg in segments:
                 expanded.append({
                     **{k: v for k, v in out.items()
-                       if k not in ("output", "formatted_output")},
-                    "output": seg if isinstance(seg, str) else str(seg),
+                       if k not in ("output", "formatted_output", "result")},
+                    "result": seg if isinstance(seg, str) else str(seg),
                 })
         else:
             expanded.append(out)

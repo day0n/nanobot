@@ -97,13 +97,14 @@ class GetWorkflowResultsTool(Tool):
                 }
                 # For text / splitText, include content preview;
                 # for media, include CDN URL
+                # MongoDB stores content in "result", not "output"
+                content = out.get("result", "") or out.get("output", "")
                 if out.get("type") in ("text", "splitText"):
-                    content = out.get("output", "")
                     entry["content_preview"] = (
                         content[:200] + "..." if len(content) > 200 else content
                     )
                 else:
-                    entry["output_url"] = out.get("output", "")
+                    entry["output_url"] = content
                 output_summary.append(entry)
 
             summary[node_id] = {
@@ -145,12 +146,12 @@ def _expand_outputs(outputs: list[dict]) -> list[dict]:
             expanded.append(out)
             continue
 
-        # Try formatted_output first, then parse output JSON string
+        # Try formatted_output first, then parse result/output JSON string
         segments = out.get("formatted_output")
         if not isinstance(segments, list):
-            raw = out.get("output", "")
+            raw = out.get("result", "") or out.get("output", "")
             try:
-                segments = json.loads(raw) if raw.startswith("[") else None
+                segments = json.loads(raw) if raw and raw.startswith("[") else None
             except (json.JSONDecodeError, TypeError):
                 segments = None
 
@@ -159,8 +160,8 @@ def _expand_outputs(outputs: list[dict]) -> list[dict]:
             for seg in segments:
                 expanded.append({
                     **{k: v for k, v in out.items()
-                       if k not in ("output", "formatted_output")},
-                    "output": seg if isinstance(seg, str) else str(seg),
+                       if k not in ("output", "formatted_output", "result")},
+                    "result": seg if isinstance(seg, str) else str(seg),
                 })
         else:
             # Single segment or unparseable — keep as-is
