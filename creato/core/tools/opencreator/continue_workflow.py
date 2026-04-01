@@ -1,10 +1,17 @@
-"""ContinueWorkflowTool — continue a paused workflow via WorkflowEngine."""
+"""ContinueWorkflowTool — restart a paused workflow from the select point.
+
+Instead of sending flow_run_type=continue to the consumer (which depends on
+consumer in-memory state), this tool kills the old flow and starts a fresh
+run with start_ids pointing to the resume frontier. The consumer's existing
+start_ids + user_selection mechanism handles the rest.
+"""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 
+import networkx as nx
 from loguru import logger
 
 from creato.core.request_context import get_request_context
@@ -58,7 +65,12 @@ class ContinueWorkflowTool(Tool):
         selected_indices: list[int] | None = None,
         **_: Any,
     ) -> str | WorkflowExecution:
-        from creato.workflow.event_bridge import register, unregister, get_paused_context
+        from nanoid import generate as nanoid_generate
+        from creato.workflow.event_bridge import (
+            register, unregister,
+            get_run_snapshot, clear_run_snapshot,
+            store_run_snapshot, RunSnapshot,
+        )
 
         request_context = get_request_context()
         user_id = request_context.get("user_id")
@@ -66,50 +78,33 @@ class ContinueWorkflowTool(Tool):
 
         if not self._engine:
             return "Error: workflow engine is not configured on this server."
-        if not self._dao:
-            return "Error: workflow data access is not configured."
         if not flow_task_id:
             return "Error: flow_task_id is required."
         if not node_id:
             return "Error: node_id is required."
-        if not flow_id or not user_id:
-            return "Error: no flow_id or user_id in context."
 
-        # ── Look up paused context (flow_run_id, ws_id) ───────────────
-        ctx = get_paused_context(flow_task_id)
-        if not ctx:
+        # ── 1. Get run snapshot ─────────────────────────────────────
+        snapshot = get_run_snapshot(flow_task_id)
+        if not snapshot:
             return (
-                f"Error: no paused context found for flow_task_id={flow_task_id}. "
-                "The workflow may not be paused or the context expired."
+                f"Error: no run snapshot found for flow_task_id={flow_task_id}. "
+                "The workflow may not have been run in this session."
             )
-        flow_run_id = ctx["flow_run_id"]
-        ws_id = ctx["ws_id"]
+        if not snapshot.nodes:
+            return "Error: run snapshot has no DAG data."
 
-        # ── Fetch results from MongoDB ─────────────────────────────────
-        try:
-            results_data = await self._dao.get_node_results(
-                workflow_id=flow_id,
-                user_id=user_id,
-                node_ids=[node_id],
+        # ── 2. Get paused node outputs from snapshot ───────────────────
+        paused_outputs = snapshot.node_outputs.get(node_id)
+        if not paused_outputs:
+            return (
+                f"Error: no outputs captured for paused node {node_id}. "
+                "The node may not have produced results yet."
             )
-        except Exception as e:
-            return f"Error: failed to fetch node results — {e}"
 
-        node_runs = results_data.get(node_id, [])
-        if not node_runs:
-            return f"Error: no results found for node {node_id}."
-
-        raw_outputs = node_runs[0].get("outputs", [])
-        if not raw_outputs:
-            return f"Error: node {node_id} has no outputs."
-
-        # ── Expand splitText segments ──────────────────────────────────
-        expanded = _expand_outputs(raw_outputs)
-
-        # ── Select outputs ─────────────────────────────────────────────
+        # ── 3. Expand splitText + select by indices ────────────────────
+        expanded = _expand_outputs(paused_outputs)
         if selected_indices is None:
-            # Default: select all (typical for splitText)
-            chosen = expanded
+            chosen = expanded  # select all (typical for splitText)
         else:
             if any(i < 1 or i > len(expanded) for i in selected_indices):
                 return (
@@ -121,46 +116,63 @@ class ContinueWorkflowTool(Tool):
         if not chosen:
             return "Error: no outputs selected."
 
-        # ── Build user_selection ───────────────────────────────────────
-        # Frontend normalises splitText → text as the selection key
-        output_type = chosen[0].get("type", "text")
-        selection_key = "text" if output_type == "splitText" else output_type
+        # ── 4. Build user_selection ────────────────────────────────────
+        user_selection = _build_user_selection(node_id, chosen)
 
-        user_selection = {
-            selection_key: [{
-                "node_id": node_id,
-                "outputs": [
-                    {
-                        "model": item.get("model", ""),
-                        # MongoDB stores content as "result", consumer expects "output"
-                        "output": item.get("result", "") or item.get("output", ""),
-                        "path": item.get("path") or [],
-                    }
-                    for item in chosen
-                ],
-            }],
-        }
+        # ── 5. Compute start_ids (successors of paused node) ──────────
+        graph = nx.DiGraph()
+        for n in snapshot.nodes:
+            if isinstance(n, dict) and "id" in n:
+                graph.add_node(n["id"])
+        for e in snapshot.edges:
+            if isinstance(e, dict) and e.get("source") and e.get("target"):
+                graph.add_edge(e["source"], e["target"])
 
-        # ── Submit continue ────────────────────────────────────────────
-        event_queue = register(ws_id)
+        start_ids = list(graph.successors(node_id))
+        if not start_ids:
+            return f"Error: paused node {node_id} has no downstream nodes to resume."
+
+        # ── 6. Kill old flow ───────────────────────────────────────────
+        await self._engine.kill(flow_task_id)
+        logger.info(f"ContinueWorkflowTool: killed old flow {flow_task_id}")
+
+        # ── 7. Submit fresh start ──────────────────────────────────────
+        new_ws_id = nanoid_generate(size=9)
+        event_queue = register(new_ws_id)
 
         try:
-            await self._engine.submit_continue(
-                flow_task_id=flow_task_id,
-                flow_run_id=flow_run_id,
-                ws_id=ws_id,
+            new_flow_task_id, new_flow_run_id = await self._engine.submit_start(
+                nodes=snapshot.nodes,
+                edges=snapshot.edges,
+                ws_id=new_ws_id,
                 user_id=user_id or "",
+                start_ids=start_ids,
+                end_ids=None,
                 user_selection=user_selection,
             )
         except Exception as e:
-            unregister(ws_id)
-            return f"Error: failed to continue workflow — {e}"
+            unregister(new_ws_id)
+            return f"Error: failed to restart workflow — {e}"
 
+        # ── 8. Rotate snapshots ────────────────────────────────────────
+        clear_run_snapshot(flow_task_id)
+        store_run_snapshot(new_flow_task_id, RunSnapshot(
+            flow_task_id=new_flow_task_id,
+            ws_id=new_ws_id,
+            nodes=snapshot.nodes,
+            edges=snapshot.edges,
+        ))
+
+        logger.info(
+            f"ContinueWorkflowTool: restarted as {new_flow_task_id}, "
+            f"start_ids={start_ids}, ws_id={new_ws_id}"
+        )
+
+        # ── 9. Return new WorkflowExecution ────────────────────────────
         async def _event_stream():
             _terminal_seen = False
             try:
                 import asyncio
-
                 while True:
                     event = await asyncio.wait_for(event_queue.get(), timeout=480)
                     et = event.get("event_type")
@@ -175,67 +187,116 @@ class ContinueWorkflowTool(Tool):
                 logger.info(
                     "ContinueWorkflowTool: 8min timeout, disconnecting SSE "
                     "(not killing). flow_task_id={}",
-                    flow_task_id,
+                    new_flow_task_id,
                 )
-            except (asyncio.CancelledError, GeneratorExit):
+            except asyncio.CancelledError:
                 if not _terminal_seen:
-                    await self._engine.kill(flow_task_id)
-                    logger.info(
-                        "ContinueWorkflowTool: stream cancelled, killed workflow. "
-                        "flow_task_id={}",
-                        flow_task_id,
-                    )
+                    await self._engine.kill(new_flow_task_id)
+                    logger.info(f"ContinueWorkflowTool: task cancelled, killed workflow. {new_flow_task_id=}")
+                raise
+            except GeneratorExit:
+                if not _terminal_seen:
+                    await self._engine.kill(new_flow_task_id)
+                    logger.info(f"ContinueWorkflowTool: stream closed, killed workflow. {new_flow_task_id=}")
                 else:
-                    logger.debug(
-                        "ContinueWorkflowTool: stream closed after terminal event, "
-                        "no kill needed. flow_task_id={}",
-                        flow_task_id,
-                    )
+                    logger.debug(f"ContinueWorkflowTool: stream closed after terminal, no kill. {new_flow_task_id=}")
             finally:
-                unregister(ws_id)
+                unregister(new_ws_id)
 
         from ._workflow_callbacks import build_interpret_event, build_make_sse_event
 
         return WorkflowExecution(
-            flow_task_id=flow_task_id,
-            run_id=flow_run_id,
-            ws_id=ws_id,
+            flow_task_id=new_flow_task_id,
+            run_id=new_flow_run_id,
+            ws_id=new_ws_id,
             event_stream=_event_stream(),
-            interpret_event=build_interpret_event(flow_task_id, flow_run_id, ws_id),
+            interpret_event=build_interpret_event(new_flow_task_id, new_flow_run_id, new_ws_id),
             make_sse_event=build_make_sse_event(),
         )
 
 
-def _expand_outputs(outputs: list[dict]) -> list[dict]:
-    """Expand splitText results so each segment is a separate entry.
+# ── Helpers ─────────────────────────────────────────────
 
-    A splitText node stores all segments in a single result document:
-    - ``formatted_output``: ``["seg1", "seg2", ...]``  (preferred)
-    - ``output``: JSON-encoded array string as fallback
 
-    Regular (non-split) outputs pass through unchanged.
+def _expand_outputs(node_outputs: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten node_outputs into a list of individual output items.
+
+    node_outputs format from events:
+      {"text": {"node_id": "xxx", "outputs": [item1, item2, ...]}}
+
+    For splitText, a single output item may contain a JSON array in its
+    "output" field — expand each segment into its own item.
+
+    Returns a flat list of output items (each is a dict with model, output, path, type, etc.)
     """
-    expanded: list[dict] = []
-    for out in outputs:
-        if out.get("type") != "splitText":
-            expanded.append(out)
+    expanded: list[dict[str, Any]] = []
+
+    for io_type, io_data in node_outputs.items():
+        if not isinstance(io_data, dict):
             continue
+        outputs = io_data.get("outputs", [])
+        for out in outputs:
+            if not isinstance(out, dict):
+                continue
+            # Tag with io_type for user_selection building
+            item = {**out, "_io_type": io_type}
 
-        segments = out.get("formatted_output")
-        if not isinstance(segments, list):
-            raw = out.get("result", "") or out.get("output", "")
-            try:
-                segments = json.loads(raw) if raw and raw.startswith("[") else None
-            except (json.JSONDecodeError, TypeError):
-                segments = None
+            # splitText: expand formatted_output or JSON-encoded output
+            if io_type == "splitText" or out.get("type") == "splitText":
+                segments = out.get("formatted_output")
+                if not isinstance(segments, list):
+                    raw = out.get("output", "")
+                    try:
+                        segments = json.loads(raw) if isinstance(raw, str) and raw.startswith("[") else None
+                    except (json.JSONDecodeError, TypeError):
+                        segments = None
 
-        if isinstance(segments, list) and len(segments) > 1:
-            for seg in segments:
-                expanded.append({
-                    **{k: v for k, v in out.items()
-                       if k not in ("output", "formatted_output", "result")},
-                    "result": seg if isinstance(seg, str) else str(seg),
-                })
-        else:
-            expanded.append(out)
+                if isinstance(segments, list) and len(segments) > 1:
+                    for seg in segments:
+                        expanded.append({
+                            **{k: v for k, v in item.items() if k not in ("output", "formatted_output")},
+                            "output": seg if isinstance(seg, str) else str(seg),
+                        })
+                    continue
+
+            expanded.append(item)
+
     return expanded
+
+
+def _build_user_selection(
+    paused_node_id: str,
+    chosen_items: list[dict[str, Any]],
+) -> dict[str, list[dict]]:
+    """Build user_selection dict from chosen output items.
+
+    Format: { "text": [{ "node_id": "xxx", "outputs": [...] }] }
+    splitText is normalized to "text" (matching frontend behavior).
+    """
+    grouped: dict[str, list[dict]] = {}
+
+    for item in chosen_items:
+        io_type = item.pop("_io_type", "text")
+        # Frontend normalizes splitText → text
+        selection_key = "text" if io_type == "splitText" else io_type
+
+        if selection_key not in grouped:
+            grouped[selection_key] = []
+
+        # Find or create the entry for this node
+        entry = None
+        for e in grouped[selection_key]:
+            if e["node_id"] == paused_node_id:
+                entry = e
+                break
+        if entry is None:
+            entry = {"node_id": paused_node_id, "outputs": []}
+            grouped[selection_key].append(entry)
+
+        entry["outputs"].append({
+            "model": item.get("model", ""),
+            "output": item.get("output", ""),
+            "path": item.get("path") or [],
+        })
+
+    return grouped

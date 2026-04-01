@@ -15,7 +15,11 @@ from creato.core.events import (
     workflow_node_failed,
     workflow_paused,
 )
-from creato.workflow.event_bridge import store_paused_context
+from creato.workflow.event_bridge import (
+    store_paused_context,
+    update_snapshot_node_outputs,
+    update_snapshot_paused_node,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -115,15 +119,24 @@ def build_interpret_event(
     Normal completion (finish_flow / flow_killed) returns a failure
     summary if any nodes failed, otherwise returns None so the executor
     falls back to ``WorkflowExecution.default_result``.
+
+    Also captures node_outputs into the RunSnapshot for restart-based continue.
     """
     failed_nodes: list[dict[str, Any]] = []
 
     def interpret_event(raw_event: dict[str, Any]) -> str | None:
         et = raw_event.get("event_type")
 
-        # select → pause, return control to LLM
+        # ── Capture node outputs into RunSnapshot ──────────────────
+        if et == "node_status" and raw_event.get("status") == "success":
+            _capture_node_outputs(flow_task_id, raw_event)
+
+        # select → capture outputs + pause, return control to LLM
         if et == "node_status" and raw_event.get("status") == "select":
             node_id = raw_event.get("node_id", "unknown")
+            _capture_node_outputs(flow_task_id, raw_event)
+            update_snapshot_paused_node(flow_task_id, node_id)
+            # Legacy compat
             store_paused_context(flow_task_id, {
                 "flow_run_id": run_id,
                 "ws_id": ws_id,
@@ -172,6 +185,14 @@ def build_interpret_event(
         return None  # keep consuming
 
     return interpret_event
+
+
+def _capture_node_outputs(flow_task_id: str, raw_event: dict[str, Any]) -> None:
+    """Extract node_outputs from a node_status event and store in snapshot."""
+    node_id = raw_event.get("node_id")
+    node_outputs = raw_event.get("node_outputs")
+    if node_id and node_outputs and isinstance(node_outputs, dict):
+        update_snapshot_node_outputs(flow_task_id, node_id, node_outputs)
 
 
 def _build_failure_summary(failed_nodes: list[dict[str, Any]]) -> str:

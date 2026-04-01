@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 _MAX_QUEUES = 500
@@ -18,11 +19,6 @@ _TTL_SECONDS = 4 * 3600  # 4 hours (aligned with Consumer's 3h lock TTL)
 
 # ws_id → (queue, registered_at_monotonic)
 _event_queues: dict[str, tuple[asyncio.Queue, float]] = {}
-
-# Paused workflow context: flow_task_id → {flow_run_id, ws_id, node_id}
-# Written by executor when workflow enters select mode,
-# read by ContinueWorkflowTool so the LLM doesn't need to pass IDs.
-_paused_contexts: dict[str, dict[str, str]] = {}
 
 
 def _sweep_expired() -> None:
@@ -67,13 +63,84 @@ async def dispatch(ws_id: str, event: dict[str, Any]) -> bool:
     return False
 
 
-# ── Paused workflow context ────────────────────────────────────────
+# ── Run Snapshot Store ────────────────────────────────────────────
+# Captures DAG + node outputs during a run so that continue_workflow
+# can restart from the paused point without depending on consumer memory.
+
+
+@dataclass
+class RunSnapshot:
+    """Snapshot of a workflow run, built incrementally from events."""
+
+    flow_task_id: str
+    ws_id: str
+    nodes: list[dict]
+    edges: list[dict]
+    paused_node_id: str = ""
+    # node_id → raw node_outputs dict from events
+    # e.g. {"text": {"node_id": "xxx", "outputs": [...]}}
+    node_outputs: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+_run_snapshots: dict[str, RunSnapshot] = {}
+
+
+def store_run_snapshot(flow_task_id: str, snapshot: RunSnapshot) -> None:
+    """Store or replace a run snapshot."""
+    _run_snapshots[flow_task_id] = snapshot
+
+
+def get_run_snapshot(flow_task_id: str) -> RunSnapshot | None:
+    """Peek at a run snapshot (does NOT delete)."""
+    return _run_snapshots.get(flow_task_id)
+
+
+def clear_run_snapshot(flow_task_id: str) -> None:
+    """Explicitly remove a run snapshot."""
+    _run_snapshots.pop(flow_task_id, None)
+
+
+def update_snapshot_node_outputs(
+    flow_task_id: str, node_id: str, outputs: dict[str, Any]
+) -> None:
+    """Append/overwrite node outputs in an existing snapshot."""
+    snap = _run_snapshots.get(flow_task_id)
+    if snap:
+        snap.node_outputs[node_id] = outputs
+
+
+def update_snapshot_paused_node(flow_task_id: str, node_id: str) -> None:
+    """Record which node entered select mode."""
+    snap = _run_snapshots.get(flow_task_id)
+    if snap:
+        snap.paused_node_id = node_id
+
+
+# ── Legacy compat (store_paused_context / get_paused_context) ─────
+# Kept for any code that still references the old API.
 
 def store_paused_context(flow_task_id: str, ctx: dict[str, str]) -> None:
-    """Store paused workflow context so continue_workflow can look it up."""
-    _paused_contexts[flow_task_id] = ctx
+    """Legacy: store minimal paused context. Prefer RunSnapshot."""
+    snap = _run_snapshots.get(flow_task_id)
+    if snap:
+        snap.paused_node_id = ctx.get("node_id", "")
+    else:
+        # Fallback: create a minimal snapshot
+        _run_snapshots[flow_task_id] = RunSnapshot(
+            flow_task_id=flow_task_id,
+            ws_id=ctx.get("ws_id", ""),
+            nodes=[],
+            edges=[],
+            paused_node_id=ctx.get("node_id", ""),
+        )
 
 
 def get_paused_context(flow_task_id: str) -> dict[str, str] | None:
-    """Retrieve and remove paused workflow context."""
-    return _paused_contexts.pop(flow_task_id, None)
+    """Legacy: retrieve paused context from snapshot (does NOT delete)."""
+    snap = _run_snapshots.get(flow_task_id)
+    if not snap or not snap.paused_node_id:
+        return None
+    return {
+        "ws_id": snap.ws_id,
+        "node_id": snap.paused_node_id,
+    }
