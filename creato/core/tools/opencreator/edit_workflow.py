@@ -12,6 +12,7 @@ from creato.core.tools.base import Tool, ToolResult
 from creato.schemas.tools import ToolEventPayload
 from creato.core.tools.opencreator.common import (
     _normalize_nodes, _normalize_edges, _find_position_issues,
+    _merge_with_db_content,
 )
 
 
@@ -24,6 +25,8 @@ class EditWorkflowTool(Tool):
         "IMPORTANT: This is a FULL REPLACEMENT — you must provide ALL nodes and edges, not just the changed ones. "
         "Always call get_workflow FIRST to see the current canvas state, then modify the returned nodes/edges "
         "and pass the complete list here. Skipping get_workflow will lose existing nodes and layout. "
+        "Content fields (prompts, images, audio, video) and heavy config fields are automatically "
+        "preserved from the database — you do NOT need to provide them unless you want to change them. "
         "The tool performs preflight normalization/validation to keep payloads frontend-compatible "
         "(node defaults, edge handle compatibility, dangling-edge cleanup). "
         "Each node MUST include a position with x/y coordinates for correct canvas layout."
@@ -81,6 +84,14 @@ class EditWorkflowTool(Tool):
 
         if not self._dao:
             return "Error: workflow data access is not configured."
+
+        # Fetch current DB nodes to preserve content fields stripped by get_workflow
+        try:
+            db_data = await self._dao.get_workflow(flow_id, user_id)
+        except Exception:
+            db_data = None
+        db_nodes = db_data.get("nodes", []) if db_data else []
+        nodes = _merge_with_db_content(nodes, db_nodes)
 
         normalized_nodes, id_map, node_warnings = _normalize_nodes(nodes)
         if not normalized_nodes and nodes:

@@ -100,9 +100,12 @@ class GetWorkflowResultsTool(Tool):
                 # MongoDB stores content in "result", not "output"
                 content = out.get("result", "") or out.get("output", "")
                 if out.get("type") in ("text", "splitText"):
-                    entry["content_preview"] = (
-                        content[:200] + "..." if len(content) > 200 else content
-                    )
+                    if len(content) > 10:
+                        entry["content_preview"] = content[:10] + "..."
+                        entry["content_length"] = len(content)
+                        entry["note"] = "Content truncated. Full text available in the workflow execution results."
+                    else:
+                        entry["content_preview"] = content
                 else:
                     entry["output_url"] = content
                 output_summary.append(entry)

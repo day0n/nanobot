@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import re as _re
 from copy import deepcopy
 from typing import Any
 from uuid import uuid4
@@ -209,6 +210,29 @@ _NODE_PIN_CONFIGS: dict[str, dict[str, list[str]]] = {
 
 _HANDLE_ALIAS: dict[str, str] = {"subject": "image", "style": "image"}
 _HANDLE_COMPATIBILITY: dict[str, set[str]] = {"subject": {"image"}, "style": {"image"}}
+
+# ── Content filtering for agent context ─────────────────────────────
+# Fields that contain user-provided heavy content (prompts, media data).
+# Replaced with presence indicators in get_workflow output.
+_CONTENT_FIELDS: dict[str, str] = {
+    "inputText": "[has content]",
+    "imageBase64": "[has image]",
+    "inputAudio": "[has audio]",
+    "inputVideo": "[has video]",
+}
+
+# Fields that are heavy visual/assembly config — stripped entirely.
+_HEAVY_CONFIG_FIELDS = frozenset({
+    "lensStyle", "lensStyleEnabled",
+    "assembleAssets", "assemblePayload",
+    "stickyMode", "stickyArrow", "stickyRotation", "backgroundColor",
+    "inputVideoPoster", "inputVideoDuration",
+})
+
+# All fields that need DB-merge preservation in edit_workflow.
+_MERGE_FIELDS = frozenset(_CONTENT_FIELDS.keys()) | _HEAVY_CONFIG_FIELDS
+
+_PLACEHOLDER_RE = _re.compile(r"^\[has \w+\]$")
 
 
 def _now_ms() -> int:
@@ -529,3 +553,106 @@ def _normalize_edges(
         )
 
     return normalized_edges, warnings
+
+
+# ── Agent-facing node stripping ─────────────────────────────────────
+
+
+def _is_placeholder(value: Any) -> bool:
+    """Return True if *value* is a ``[has …]`` placeholder injected by strip."""
+    return isinstance(value, str) and bool(_PLACEHOLDER_RE.match(value))
+
+
+def _strip_node_for_agent(node: dict[str, Any]) -> dict[str, Any]:
+    """Return a lightweight copy of *node* suitable for the agent context.
+
+    * Content fields → presence indicator (``"[has content]"``) or ``""``.
+    * Heavy config fields → removed entirely.
+    * Everything else (structural / metadata) → kept as-is.
+    """
+    out = {
+        "id": node.get("id"),
+        "type": node.get("type"),
+        "position": node.get("position"),
+        "selected": node.get("selected", False),
+    }
+
+    raw_data = node.get("data")
+    if not isinstance(raw_data, dict):
+        out["data"] = {}
+        return out
+
+    data: dict[str, Any] = {}
+    for key, value in raw_data.items():
+        # Content fields → placeholder or empty
+        if key in _CONTENT_FIELDS:
+            if isinstance(value, str) and value.strip():
+                data[key] = _CONTENT_FIELDS[key]
+            else:
+                data[key] = ""
+            continue
+        # Heavy config → drop
+        if key in _HEAVY_CONFIG_FIELDS:
+            continue
+        # Everything else → keep
+        data[key] = value
+
+    out["data"] = data
+    return out
+
+
+def _merge_with_db_content(
+    agent_nodes: list[dict[str, Any]],
+    db_nodes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge agent-submitted nodes with DB nodes to preserve stripped fields.
+
+    For each agent node whose ``id`` matches a DB node, any field in
+    ``_MERGE_FIELDS`` that the agent did not explicitly set (missing,
+    or still carrying a placeholder value) is restored from the DB version.
+
+    New nodes (id not in DB) pass through unchanged.
+    """
+    db_index: dict[str, dict[str, Any]] = {}
+    for n in db_nodes:
+        if isinstance(n, dict):
+            nid = n.get("id")
+            if nid:
+                db_index[nid] = n
+
+    merged: list[dict[str, Any]] = []
+    for agent_node in agent_nodes:
+        if not isinstance(agent_node, dict):
+            merged.append(agent_node)
+            continue
+
+        node_id = agent_node.get("id", "")
+        db_node = db_index.get(node_id)
+        if db_node is None:
+            # New node — use as-is
+            merged.append(agent_node)
+            continue
+
+        # Existing node — merge content/config fields from DB
+        agent_data = agent_node.get("data")
+        if not isinstance(agent_data, dict):
+            agent_data = {}
+        db_data = db_node.get("data")
+        if not isinstance(db_data, dict):
+            db_data = {}
+
+        merged_data = dict(agent_data)
+        for field in _MERGE_FIELDS:
+            agent_val = agent_data.get(field)
+            # Restore from DB when: field missing, or agent echoed back a placeholder
+            if agent_val is None or _is_placeholder(agent_val):
+                db_val = db_data.get(field)
+                if db_val is not None:
+                    merged_data[field] = db_val
+            # Otherwise (agent provided real value or empty string) → keep agent's value
+
+        merged_node = dict(agent_node)
+        merged_node["data"] = merged_data
+        merged.append(merged_node)
+
+    return merged

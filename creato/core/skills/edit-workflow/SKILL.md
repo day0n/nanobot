@@ -64,7 +64,9 @@ Pin 兼容: text→text, image→image/subject/style, video→video, audio→aud
 ## Checklist
 
 - 节点类型在允许列表内
-- 每个节点有 type, id, position, data（含 label, description, themeColor, modelCardColor, selectedModels, inputText, status）
+- 每个节点有 type, id, position, data（含 label, description, themeColor, modelCardColor, selectedModels, status）
+- 内容字段（inputText, imageBase64, inputAudio, inputVideo）和重型配置（lensStyle, assembleAssets 等）**不需要 round-trip**——`edit_workflow` 会自动从数据库恢复。只在需要修改内容时才显式传入
+- 如果 `get_workflow` 返回了占位符（如 `"[has content]"`），原样回传即可，工具会自动保留原值
 - 每条边有 source, target, sourceHandle, targetHandle, type:"customEdge"
 - 句柄类型兼容，不超连接上限，无自连，无环
 - 未修改节点保留原始坐标

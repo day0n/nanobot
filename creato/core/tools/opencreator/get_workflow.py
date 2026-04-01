@@ -10,6 +10,7 @@ from loguru import logger
 from creato.core.request_context import get_request_context
 from creato.core.tools.base import Tool, ToolResult
 from creato.schemas.tools import ToolEventPayload
+from creato.core.tools.opencreator.common import _strip_node_for_agent
 
 
 class GetWorkflowTool(Tool):
@@ -17,9 +18,11 @@ class GetWorkflowTool(Tool):
 
     name = "get_workflow"
     description = (
-        "Fetch the complete current workflow from the active canvas session, including all nodes, "
-        "edges, and their current positions. Use this before editing an existing workflow so "
-        "unchanged nodes and layout can be preserved."
+        "Fetch the current workflow structure from the active canvas session. "
+        "Returns a lightweight view: node topology (id, type, position, connections), "
+        "model selection, and config — but NOT the actual content inside nodes "
+        "(prompts, images, audio, video are replaced with presence indicators like '[has content]'). "
+        "Use this before editing an existing workflow so unchanged nodes and layout can be preserved."
     )
     parameters = {
         "type": "object",
@@ -68,7 +71,7 @@ class GetWorkflowTool(Tool):
         result = {
             "flow_id": data.get("flow_id", flow_id),
             "project_name": project_name,
-            "nodes": nodes,
+            "nodes": [_strip_node_for_agent(n) for n in nodes],
             "edges": edges,
         }
 
