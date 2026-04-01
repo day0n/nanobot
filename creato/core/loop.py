@@ -184,9 +184,10 @@ class AgentLoop:
                 max_iterations=self.max_iterations,
                 hooks=hooks,
             )
+            result = None
             result = await executor.run(initial_messages)
         finally:
-            _agent_span.set_data("gen_ai.response.text", (result.content or "")[:4096])
+            _agent_span.set_data("gen_ai.response.text", (result.content or "")[:4096] if result else "")
             _agent_span.__exit__(None, None, None)
 
         return result.content, result.tools_used, result.messages, result.tool_timings

@@ -366,6 +366,10 @@ class AgentExecutor:
                     if result_str is not None:
                         break
 
+        except asyncio.CancelledError:
+            logger.warning("Workflow event stream cancelled: flow_task_id={}", wf_exec.flow_task_id)
+            return "Workflow was cancelled."
+
         except Exception as stream_err:
             logger.error("Workflow event stream error: {}", stream_err)
             return f"Error consuming workflow events: {stream_err}"
