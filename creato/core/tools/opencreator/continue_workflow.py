@@ -1,9 +1,7 @@
-"""ContinueWorkflowTool — restart a paused workflow from the select point.
+"""ContinueWorkflowTool — continue a paused workflow via WorkflowEngine.
 
-Instead of sending flow_run_type=continue to the consumer (which depends on
-consumer in-memory state), this tool kills the old flow and starts a fresh
-run with start_ids pointing to the resume frontier. The consumer's existing
-start_ids + user_selection mechanism handles the rest.
+Uses the consumer's real run_id (captured from start_flow event) to call
+submit_continue, which resumes the existing executor in the consumer.
 """
 
 from __future__ import annotations
@@ -11,7 +9,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import networkx as nx
 from loguru import logger
 
 from creato.core.request_context import get_request_context
@@ -65,16 +62,10 @@ class ContinueWorkflowTool(Tool):
         selected_indices: list[int] | None = None,
         **_: Any,
     ) -> str | WorkflowExecution:
-        from nanoid import generate as nanoid_generate
-        from creato.workflow.event_bridge import (
-            register, unregister,
-            get_run_snapshot, clear_run_snapshot,
-            store_run_snapshot, RunSnapshot,
-        )
+        from creato.workflow.event_bridge import register, unregister, get_run_snapshot
 
         request_context = get_request_context()
         user_id = request_context.get("user_id")
-        flow_id = request_context.get("flow_id")
 
         if not self._engine:
             return "Error: workflow engine is not configured on this server."
@@ -83,15 +74,20 @@ class ContinueWorkflowTool(Tool):
         if not node_id:
             return "Error: node_id is required."
 
-        # ── 1. Get run snapshot ─────────────────────────────────────
+        # ── 1. Get run snapshot ────────────────────────────────────────
         snapshot = get_run_snapshot(flow_task_id)
         if not snapshot:
             return (
                 f"Error: no run snapshot found for flow_task_id={flow_task_id}. "
                 "The workflow may not have been run in this session."
             )
-        if not snapshot.nodes:
-            return "Error: run snapshot has no DAG data."
+
+        consumer_run_id = snapshot.consumer_run_id
+        ws_id = snapshot.ws_id
+        if not consumer_run_id:
+            return "Error: consumer run_id not captured. The workflow may not have started properly."
+        if not ws_id:
+            return "Error: ws_id not found in snapshot."
 
         # ── 2. Get paused node outputs from snapshot ───────────────────
         paused_outputs = snapshot.node_outputs.get(node_id)
@@ -119,56 +115,27 @@ class ContinueWorkflowTool(Tool):
         # ── 4. Build user_selection ────────────────────────────────────
         user_selection = _build_user_selection(node_id, chosen)
 
-        # ── 5. Compute start_ids (successors of paused node) ──────────
-        graph = nx.DiGraph()
-        for n in snapshot.nodes:
-            if isinstance(n, dict) and "id" in n:
-                graph.add_node(n["id"])
-        for e in snapshot.edges:
-            if isinstance(e, dict) and e.get("source") and e.get("target"):
-                graph.add_edge(e["source"], e["target"])
-
-        start_ids = list(graph.successors(node_id))
-        if not start_ids:
-            return f"Error: paused node {node_id} has no downstream nodes to resume."
-
-        # ── 6. Kill old flow ───────────────────────────────────────────
-        await self._engine.kill(flow_task_id)
-        logger.info(f"ContinueWorkflowTool: killed old flow {flow_task_id}")
-
-        # ── 7. Submit fresh start ──────────────────────────────────────
-        new_ws_id = nanoid_generate(size=9)
-        event_queue = register(new_ws_id)
+        # ── 5. Register event queue and submit continue ────────────────
+        event_queue = register(ws_id)
 
         try:
-            new_flow_task_id, new_flow_run_id = await self._engine.submit_start(
-                nodes=snapshot.nodes,
-                edges=snapshot.edges,
-                ws_id=new_ws_id,
+            await self._engine.submit_continue(
+                flow_task_id=flow_task_id,
+                flow_run_id=consumer_run_id,
+                ws_id=ws_id,
                 user_id=user_id or "",
-                start_ids=start_ids,
-                end_ids=None,
                 user_selection=user_selection,
             )
         except Exception as e:
-            unregister(new_ws_id)
-            return f"Error: failed to restart workflow — {e}"
-
-        # ── 8. Rotate snapshots ────────────────────────────────────────
-        clear_run_snapshot(flow_task_id)
-        store_run_snapshot(new_flow_task_id, RunSnapshot(
-            flow_task_id=new_flow_task_id,
-            ws_id=new_ws_id,
-            nodes=snapshot.nodes,
-            edges=snapshot.edges,
-        ))
+            unregister(ws_id)
+            return f"Error: failed to continue workflow — {e}"
 
         logger.info(
-            f"ContinueWorkflowTool: restarted as {new_flow_task_id}, "
-            f"start_ids={start_ids}, ws_id={new_ws_id}"
+            f"ContinueWorkflowTool: submitted continue for {flow_task_id}, "
+            f"consumer_run_id={consumer_run_id}, ws_id={ws_id}"
         )
 
-        # ── 9. Return new WorkflowExecution ────────────────────────────
+        # ── 6. Return WorkflowExecution ────────────────────────────────
         async def _event_stream():
             _terminal_seen = False
             try:
@@ -187,35 +154,35 @@ class ContinueWorkflowTool(Tool):
                 logger.info(
                     "ContinueWorkflowTool: 8min timeout, disconnecting SSE "
                     "(not killing). flow_task_id={}",
-                    new_flow_task_id,
+                    flow_task_id,
                 )
             except asyncio.CancelledError:
                 if not _terminal_seen:
-                    await self._engine.kill(new_flow_task_id)
-                    logger.info(f"ContinueWorkflowTool: task cancelled, killed workflow. {new_flow_task_id=}")
+                    await self._engine.kill(flow_task_id)
+                    logger.info(f"ContinueWorkflowTool: task cancelled, killed workflow. {flow_task_id=}")
                 raise
             except GeneratorExit:
                 if not _terminal_seen:
-                    await self._engine.kill(new_flow_task_id)
-                    logger.info(f"ContinueWorkflowTool: stream closed, killed workflow. {new_flow_task_id=}")
+                    await self._engine.kill(flow_task_id)
+                    logger.info(f"ContinueWorkflowTool: stream closed, killed workflow. {flow_task_id=}")
                 else:
-                    logger.debug(f"ContinueWorkflowTool: stream closed after terminal, no kill. {new_flow_task_id=}")
+                    logger.debug(f"ContinueWorkflowTool: stream closed after terminal, no kill. {flow_task_id=}")
             finally:
-                unregister(new_ws_id)
+                unregister(ws_id)
 
         from ._workflow_callbacks import build_interpret_event, build_make_sse_event
 
         return WorkflowExecution(
-            flow_task_id=new_flow_task_id,
-            run_id=new_flow_run_id,
-            ws_id=new_ws_id,
+            flow_task_id=flow_task_id,
+            run_id=consumer_run_id,
+            ws_id=ws_id,
             event_stream=_event_stream(),
-            interpret_event=build_interpret_event(new_flow_task_id, new_flow_run_id, new_ws_id),
+            interpret_event=build_interpret_event(flow_task_id, consumer_run_id, ws_id),
             make_sse_event=build_make_sse_event(),
         )
 
 
-# ── Helpers ─────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────
 
 
 def _expand_outputs(node_outputs: dict[str, Any]) -> list[dict[str, Any]]:
@@ -226,8 +193,6 @@ def _expand_outputs(node_outputs: dict[str, Any]) -> list[dict[str, Any]]:
 
     For splitText, a single output item may contain a JSON array in its
     "output" field — expand each segment into its own item.
-
-    Returns a flat list of output items (each is a dict with model, output, path, type, etc.)
     """
     expanded: list[dict[str, Any]] = []
 
@@ -238,7 +203,6 @@ def _expand_outputs(node_outputs: dict[str, Any]) -> list[dict[str, Any]]:
         for out in outputs:
             if not isinstance(out, dict):
                 continue
-            # Tag with io_type for user_selection building
             item = {**out, "_io_type": io_type}
 
             # splitText: expand formatted_output or JSON-encoded output
@@ -277,13 +241,11 @@ def _build_user_selection(
 
     for item in chosen_items:
         io_type = item.pop("_io_type", "text")
-        # Frontend normalizes splitText → text
         selection_key = "text" if io_type == "splitText" else io_type
 
         if selection_key not in grouped:
             grouped[selection_key] = []
 
-        # Find or create the entry for this node
         entry = None
         for e in grouped[selection_key]:
             if e["node_id"] == paused_node_id:

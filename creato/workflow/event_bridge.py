@@ -76,6 +76,7 @@ class RunSnapshot:
     ws_id: str
     nodes: list[dict]
     edges: list[dict]
+    consumer_run_id: str = ""  # Real run_id from consumer's start_flow event
     paused_node_id: str = ""
     # node_id → raw node_outputs dict from events
     # e.g. {"text": {"node_id": "xxx", "outputs": [...]}}
@@ -98,6 +99,13 @@ def get_run_snapshot(flow_task_id: str) -> RunSnapshot | None:
 def clear_run_snapshot(flow_task_id: str) -> None:
     """Explicitly remove a run snapshot."""
     _run_snapshots.pop(flow_task_id, None)
+
+
+def update_snapshot_consumer_run_id(flow_task_id: str, run_id: str) -> None:
+    """Store the consumer's real run_id from start_flow event."""
+    snap = _run_snapshots.get(flow_task_id)
+    if snap:
+        snap.consumer_run_id = run_id
 
 
 def update_snapshot_node_outputs(

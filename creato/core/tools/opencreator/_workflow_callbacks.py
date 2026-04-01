@@ -17,6 +17,7 @@ from creato.core.events import (
 )
 from creato.workflow.event_bridge import (
     store_paused_context,
+    update_snapshot_consumer_run_id,
     update_snapshot_node_outputs,
     update_snapshot_paused_node,
 )
@@ -126,6 +127,10 @@ def build_interpret_event(
 
     def interpret_event(raw_event: dict[str, Any]) -> str | None:
         et = raw_event.get("event_type")
+
+        # ── Capture consumer's real run_id from start_flow event ──────
+        if et == "start_flow" and raw_event.get("run_id"):
+            update_snapshot_consumer_run_id(flow_task_id, raw_event["run_id"])
 
         # ── Capture node outputs into RunSnapshot ──────────────────
         if et == "node_status" and raw_event.get("status") == "success":
