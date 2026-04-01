@@ -30,14 +30,6 @@ class ContinueWorkflowTool(Tool):
                 "type": "string",
                 "description": "The flow_task_id from the paused workflow context.",
             },
-            "flow_run_id": {
-                "type": "string",
-                "description": "The flow_run_id from the paused workflow context.",
-            },
-            "ws_id": {
-                "type": "string",
-                "description": "The ws_id from the paused workflow context.",
-            },
             "node_id": {
                 "type": "string",
                 "description": "The node_id of the paused select node.",
@@ -52,7 +44,7 @@ class ContinueWorkflowTool(Tool):
                 ),
             },
         },
-        "required": ["flow_task_id", "flow_run_id", "ws_id", "node_id"],
+        "required": ["flow_task_id", "node_id"],
     }
 
     def __init__(self, workflow_engine: Any = None, workflow_dao: Any = None):
@@ -62,13 +54,11 @@ class ContinueWorkflowTool(Tool):
     async def execute(
         self,
         flow_task_id: str = "",
-        flow_run_id: str = "",
-        ws_id: str = "",
         node_id: str = "",
         selected_indices: list[int] | None = None,
         **_: Any,
     ) -> str | WorkflowExecution:
-        from creato.workflow.event_bridge import register, unregister
+        from creato.workflow.event_bridge import register, unregister, get_paused_context
 
         request_context = get_request_context()
         user_id = request_context.get("user_id")
@@ -78,12 +68,22 @@ class ContinueWorkflowTool(Tool):
             return "Error: workflow engine is not configured on this server."
         if not self._dao:
             return "Error: workflow data access is not configured."
-        if not flow_task_id or not flow_run_id or not ws_id:
-            return "Error: flow_task_id, flow_run_id, and ws_id are all required."
+        if not flow_task_id:
+            return "Error: flow_task_id is required."
         if not node_id:
             return "Error: node_id is required."
         if not flow_id or not user_id:
             return "Error: no flow_id or user_id in context."
+
+        # ── Look up paused context (flow_run_id, ws_id) ───────────────
+        ctx = get_paused_context(flow_task_id)
+        if not ctx:
+            return (
+                f"Error: no paused context found for flow_task_id={flow_task_id}. "
+                "The workflow may not be paused or the context expired."
+            )
+        flow_run_id = ctx["flow_run_id"]
+        ws_id = ctx["ws_id"]
 
         # ── Fetch results from MongoDB ─────────────────────────────────
         try:

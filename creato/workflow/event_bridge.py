@@ -19,6 +19,11 @@ _TTL_SECONDS = 4 * 3600  # 4 hours (aligned with Consumer's 3h lock TTL)
 # ws_id → (queue, registered_at_monotonic)
 _event_queues: dict[str, tuple[asyncio.Queue, float]] = {}
 
+# Paused workflow context: flow_task_id → {flow_run_id, ws_id, node_id}
+# Written by executor when workflow enters select mode,
+# read by ContinueWorkflowTool so the LLM doesn't need to pass IDs.
+_paused_contexts: dict[str, dict[str, str]] = {}
+
 
 def _sweep_expired() -> None:
     """Remove queues older than _TTL_SECONDS. Called lazily from register/dispatch."""
@@ -60,3 +65,15 @@ async def dispatch(ws_id: str, event: dict[str, Any]) -> bool:
         await q.put(event)
         return True
     return False
+
+
+# ── Paused workflow context ────────────────────────────────────────
+
+def store_paused_context(flow_task_id: str, ctx: dict[str, str]) -> None:
+    """Store paused workflow context so continue_workflow can look it up."""
+    _paused_contexts[flow_task_id] = ctx
+
+
+def get_paused_context(flow_task_id: str) -> dict[str, str] | None:
+    """Retrieve and remove paused workflow context."""
+    return _paused_contexts.pop(flow_task_id, None)

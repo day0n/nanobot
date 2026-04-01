@@ -360,6 +360,13 @@ class AgentExecutor:
                 # select → pause, return control to LLM
                 if et == "node_status" and raw_event.get("status") == "select":
                     node_id = raw_event.get("node_id", "unknown")
+                    # Store paused context so continue_workflow can look it up
+                    from creato.workflow.event_bridge import store_paused_context
+                    store_paused_context(wf_exec.flow_task_id, {
+                        "flow_run_id": wf_exec.run_id,
+                        "ws_id": wf_exec.ws_id,
+                        "node_id": node_id,
+                    })
                     if self.hooks.on_workflow_paused:
                         await self.hooks.on_workflow_paused({
                             "flow_task_id": wf_exec.flow_task_id,
