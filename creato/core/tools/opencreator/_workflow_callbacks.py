@@ -160,13 +160,13 @@ def _build_select_card_info(
         hint = f"Text was split into {option_count} segments. Select which segments to pass downstream."
         recommended_action = "Review segments and select all or specific ones"
     else:
-        selection_mode = "single"
+        selection_mode = "multi"
         if model_names:
             models_str = ", ".join(model_names)
-            hint = f"This node ran {option_count} model(s) ({models_str}). Compare the outputs and pick the best one."
+            hint = f"This node ran {option_count} model(s) ({models_str}). Compare the outputs and select the ones you want to keep."
         else:
-            hint = f"This node produced {option_count} outputs. Compare and pick the best one."
-        recommended_action = "Compare outputs and select one"
+            hint = f"This node produced {option_count} outputs. Compare and select the ones you want to keep."
+        recommended_action = "Compare outputs and select one or more"
 
     return {
         "flow_task_id": flow_task_id,

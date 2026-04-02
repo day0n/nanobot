@@ -96,6 +96,9 @@ class Session:
         out: list[dict[str, Any]] = []
         for m in sliced:
             role = m["role"]
+            # Skip display-only workflow events — not valid LLM roles
+            if role == "workflow_event":
+                continue
             # Map "agent" back to "assistant" for LLM API compatibility
             if role == "agent":
                 role = "assistant"
