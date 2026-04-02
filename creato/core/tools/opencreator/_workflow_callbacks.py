@@ -6,6 +6,7 @@ stays free of workflow-specific business logic.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Callable
 
@@ -13,7 +14,6 @@ from creato.core.events import (
     WORKFLOW_EVENT_MAP,
     AgentEvent,
     workflow_node_failed,
-    workflow_paused,
     workflow_select_card,
     workflow_selection_resolved,
 )
@@ -57,12 +57,17 @@ def _extract_node_type(node_id: str) -> str:
     return _NODE_TYPE_LABELS.get(prefix, prefix)
 
 
+def _extract_node_type_raw(node_id: str) -> str:
+    """Extract the raw node type prefix (e.g. 'splitText') from a node_id."""
+    m = _NODE_ID_PREFIX_RE.match(node_id)
+    return m.group(1) if m else ""
+
+
 # ---------------------------------------------------------------------------
 # Failure analysis
 # ---------------------------------------------------------------------------
 
 _ERROR_ANALYSIS: list[tuple[Callable[[str, str], bool], str, str]] = [
-    # (matcher, category, suggestion)
     (
         lambda code, msg: code == "3003" or "InsufficientCredits" in msg,
         "insufficient_credits",
@@ -108,8 +113,75 @@ def _analyze_failure(error_msg: str, error_code: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Select card helpers
+# ---------------------------------------------------------------------------
+
+def _count_outputs(node_outputs: dict[str, Any]) -> int:
+    """Count total output items across all IO types in node_outputs."""
+    total = 0
+    for io_data in node_outputs.values():
+        if isinstance(io_data, dict):
+            outputs = io_data.get("outputs", [])
+            if isinstance(outputs, list):
+                total += len(outputs)
+    return total
+
+
+def _extract_model_names(node_outputs: dict[str, Any]) -> list[str]:
+    """Extract model names from node_outputs."""
+    models: list[str] = []
+    for io_data in node_outputs.values():
+        if isinstance(io_data, dict):
+            for item in io_data.get("outputs", []):
+                if isinstance(item, dict):
+                    model = item.get("model", "")
+                    if model and model not in models:
+                        models.append(model)
+    return models
+
+
+def _build_select_card_info(
+    flow_task_id: str,
+    run_id: str,
+    node_id: str,
+    raw_event: dict[str, Any],
+) -> dict[str, Any]:
+    """Build enriched card_info for workflow.select_card SSE event."""
+    node_type_raw = _extract_node_type_raw(node_id)
+    node_type_label = _extract_node_type(node_id)
+    node_outputs = raw_event.get("node_outputs", {})
+    option_count = _count_outputs(node_outputs)
+    model_names = _extract_model_names(node_outputs)
+    is_split = node_type_raw == "splitText"
+
+    if is_split:
+        selection_mode = "multi"
+        hint = f"Text was split into {option_count} segments. Select which segments to pass downstream."
+        recommended_action = "Review segments and select all or specific ones"
+    else:
+        selection_mode = "single"
+        if model_names:
+            models_str = ", ".join(model_names)
+            hint = f"This node ran {option_count} model(s) ({models_str}). Compare the outputs and pick the best one."
+        else:
+            hint = f"This node produced {option_count} outputs. Compare and pick the best one."
+        recommended_action = "Compare outputs and select one"
+
+    return {
+        "flow_task_id": flow_task_id,
+        "run_id": run_id,
+        "node_id": node_id,
+        "node_type": node_type_label,
+        "option_count": option_count,
+        "selection_mode": selection_mode,
+        "hint": hint,
+        "recommended_action": recommended_action,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Callback builders
-# ----------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def build_interpret_event(
     flow_task_id: str,
@@ -120,29 +192,15 @@ def build_interpret_event(
 ) -> Callable[[dict[str, Any]], str | None]:
     """Build an ``interpret_event`` callback for WorkflowExecution.
 
-    Tracks running_count to detect when all parallel branches have settled.
-    SELECT no longer terminates the stream — it accumulates paused nodes.
-    The stream only breaks when running_count == 0 AND there are unresolved
-    paused nodes.
-
-    ``initial_paused_nodes`` allows inheriting paused state from a previous
-    turn (e.g. when continue_workflow is called after all-settled).
+    SSE stays open until finish_flow/flow_killed. SELECT never terminates
+    the stream — it only captures data and emits a card event via make_sse_event.
+    User selections come in via HTTP POST as synthetic _selection_resolved events.
 
     Also captures node_outputs into the RunSnapshot for continue.
     """
     failed_nodes: list[dict[str, Any]] = []
-    running_nodes: set[str] = set()  # track by node_id to prevent double-count
+    running_nodes: set[str] = set()
     paused_nodes: set[str] = set(initial_paused_nodes) if initial_paused_nodes else set()
-
-    def _check_all_settled() -> str | None:
-        """Return pause message if all branches have settled, else None."""
-        if not running_nodes and paused_nodes:
-            if stream_state is not None:
-                stream_state["select_paused"] = True
-            return _build_all_settled_message(
-                flow_task_id, run_id, ws_id, paused_nodes, failed_nodes,
-            )
-        return None
 
     def interpret_event(raw_event: dict[str, Any]) -> str | None:
         et = raw_event.get("event_type")
@@ -168,13 +226,11 @@ def build_interpret_event(
                 _capture_node_outputs(flow_task_id, raw_event)
                 update_snapshot_paused_node(flow_task_id, node_id)
                 paused_nodes.add(node_id)
-                # Legacy compat
                 store_paused_context(flow_task_id, {
                     "flow_run_id": run_id,
                     "ws_id": ws_id,
                     "node_id": node_id,
                 })
-                # DO NOT return — keep consuming. make_sse_event emits the card.
 
             elif status == "failed":
                 running_nodes.discard(node_id)
@@ -184,7 +240,7 @@ def build_interpret_event(
                     "error_code": str(raw_event.get("error_code", "")),
                 })
 
-            return _check_all_settled()
+            return None  # never break on node_status
 
         # ── node timed out ────────────────────────────────────────────
         if et == "node_time_out":
@@ -194,7 +250,7 @@ def build_interpret_event(
                 "error_msg": "Node execution timed out",
                 "error_code": "TIMEOUT",
             })
-            return _check_all_settled()
+            return None
 
         # ── Synthetic: selection resolved via HTTP POST ────────────────
         if et == "_selection_resolved":
@@ -241,51 +297,29 @@ def _build_failure_summary(failed_nodes: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-def _build_all_settled_message(
-    flow_task_id: str,
-    run_id: str,
-    ws_id: str,
-    paused_nodes: set[str],
-    failed_nodes: list[dict[str, Any]],
-) -> str:
-    """Build pause message when all branches have settled (no running nodes)."""
-    node_list = ", ".join(sorted(paused_nodes))
-    msg = (
-        f"Workflow paused: {len(paused_nodes)} node(s) in select mode — {node_list}.\n"
-        f"Each produced multiple outputs and the downstream nodes need "
-        f"the user to choose which result to use.\n"
-        f"Paused workflow context: flow_task_id={flow_task_id}, "
-        f"flow_run_id={run_id}, ws_id={ws_id}\n"
-        f"Next step: call get_workflow_results to see the available "
-        f"outputs, then present the choices to the user."
-    )
-    if failed_nodes:
-        msg += (
-            f"\n\nNote: {len(failed_nodes)} node(s) failed during this run:\n"
-            + _build_failure_summary(failed_nodes)
-        )
-    return msg
+def build_make_sse_event(
+    flow_task_id: str = "",
+    run_id: str = "",
+) -> Callable[[dict[str, Any]], AgentEvent | None]:
+    """Build ``make_sse_event`` callback that converts Consumer events to AgentEvents.
 
-
-def build_make_sse_event() -> Callable[[dict[str, Any]], AgentEvent | None]:
-    """Build ``make_sse_event`` callback that converts Consumer events to AgentEvents."""
+    ``flow_task_id`` and ``run_id`` are injected into workflow.select_card
+    events so the frontend has full context to submit selections via HTTP POST.
+    """
 
     def make_sse_event(raw_event: dict[str, Any]) -> AgentEvent | None:
         et = raw_event.get("event_type")
 
-        # select node → emit workflow.select_card SSE (does NOT break stream)
+        # select node → emit workflow.select_card with enriched card_info
         if et == "node_status" and raw_event.get("status") == "select":
             node_id = raw_event.get("node_id", "")
+            card_info = _build_select_card_info(
+                flow_task_id, run_id, node_id, raw_event,
+            )
             card_data = {
                 **raw_event,
-                "card_info": {
-                    "node_id": node_id,
-                    "node_type": _extract_node_type(node_id),
-                    "explanation": (
-                        f"{_extract_node_type(node_id)} node produced multiple outputs. "
-                        f"Choose which to use."
-                    ),
-                },
+                "flow_task_id": flow_task_id,
+                "card_info": card_info,
             }
             return workflow_select_card(card_data)
 

@@ -121,35 +121,36 @@ class RunWorkflowTool(Tool):
         ))
 
         # 5. Return WorkflowExecution — loop.py will consume the event stream
-        _stream_state: dict[str, Any] = {"terminal_seen": False, "select_paused": False}
+        _terminal_seen = False
 
         async def _event_stream():
+            nonlocal _terminal_seen
+            import asyncio
             try:
-                import asyncio
                 while True:
-                    event = await asyncio.wait_for(event_queue.get(), timeout=480)  # 8 minutes
+                    try:
+                        event = await asyncio.wait_for(event_queue.get(), timeout=60)
+                    except asyncio.TimeoutError:
+                        # Idle heartbeat — keep stream alive while waiting for
+                        # user to select cards or consumer to finish.
+                        continue
                     et = event.get("event_type")
                     if et in ("finish_flow", "flow_killed"):
-                        _stream_state["terminal_seen"] = True
-                    # SELECT is no longer terminal — keep consuming
+                        _terminal_seen = True
                     yield event
-                    if _stream_state["terminal_seen"]:
+                    if _terminal_seen:
                         break
-            except asyncio.TimeoutError:
-                logger.info(f"RunWorkflowTool: 8min timeout, disconnecting SSE (not killing). {flow_task_id=}")
             except asyncio.CancelledError:
-                if not _stream_state["terminal_seen"] and not _stream_state["select_paused"]:
+                if not _terminal_seen:
                     await self._engine.kill(flow_task_id)
                     logger.info(f"RunWorkflowTool: task cancelled, killed workflow. {flow_task_id=}")
                 raise
             except GeneratorExit:
-                if not _stream_state["terminal_seen"] and not _stream_state["select_paused"]:
+                if not _terminal_seen:
                     await self._engine.kill(flow_task_id)
                     logger.info(f"RunWorkflowTool: stream closed, killed workflow. {flow_task_id=}")
             finally:
-                if _stream_state["terminal_seen"]:
-                    unregister(ws_id)
-                # select_paused or timeout: do NOT unregister — queue stays for reuse
+                unregister(ws_id)
 
         from ._workflow_callbacks import build_interpret_event, build_make_sse_event
 
@@ -158,6 +159,6 @@ class RunWorkflowTool(Tool):
             run_id=flow_run_id,
             ws_id=ws_id,
             event_stream=_event_stream(),
-            interpret_event=build_interpret_event(flow_task_id, flow_run_id, ws_id, stream_state=_stream_state),
-            make_sse_event=build_make_sse_event(),
+            interpret_event=build_interpret_event(flow_task_id, flow_run_id, ws_id),
+            make_sse_event=build_make_sse_event(flow_task_id, flow_run_id),
         )

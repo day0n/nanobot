@@ -94,7 +94,6 @@ PROFILE = AgentProfile(
         _get_node_spec,
         _edit_workflow,
         _run_workflow,
-        _continue_workflow,
     ),
     inline_skills=("edit-workflow",),
     loadable_skills=("weather", "summarize", "workflow-user-guide"),
