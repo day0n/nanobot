@@ -314,12 +314,23 @@ def build_make_sse_event(
         # select node → emit workflow.select_card with enriched card_info
         if et == "node_status" and raw_event.get("status") == "select":
             node_id = raw_event.get("node_id", "")
+            event_run_id = raw_event.get("run_id", run_id)
             card_info = _build_select_card_info(
                 flow_task_id, run_id, node_id, raw_event,
             )
+            # Inject run_id into each node_outputs entry — frontend's
+            # isNodeOutputs type guard requires it.
+            patched_outputs = {}
+            raw_outputs = raw_event.get("node_outputs", {})
+            for io_type, io_data in raw_outputs.items():
+                if isinstance(io_data, dict) and "run_id" not in io_data:
+                    patched_outputs[io_type] = {**io_data, "run_id": event_run_id}
+                else:
+                    patched_outputs[io_type] = io_data
             card_data = {
                 **raw_event,
                 "flow_task_id": flow_task_id,
+                "node_outputs": patched_outputs,
                 "card_info": card_info,
             }
             return workflow_select_card(card_data)
