@@ -37,6 +37,7 @@ _NODE_TYPE_LABELS: dict[str, str] = {
     "tts": "Text to Speech",
     "musicGeneration": "Music Generation",
     "splitText": "Text Splitter",
+    "scriptSplit": "Text Splitter",
     "assembleNow": "Assemble",
     "stickyNote": "Sticky Note",
     "imageToImage": "Image to Image",
@@ -152,7 +153,7 @@ def _build_select_card_info(
     node_outputs = raw_event.get("node_outputs", {})
     option_count = _count_outputs(node_outputs)
     model_names = _extract_model_names(node_outputs)
-    is_split = node_type_raw == "splitText"
+    is_split = node_type_raw in ("splitText", "scriptSplit")
 
     if is_split:
         selection_mode = "multi"

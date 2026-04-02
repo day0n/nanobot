@@ -240,7 +240,10 @@ class AgentLoop:
             if on_progress and sse_event:
                 await on_progress(sse_event)
             if sse_event and hasattr(sse_event, "to_dict"):
-                self._pending_workflow_events.append(sse_event.to_dict())
+                evt_dict = sse_event.to_dict()
+                # Skip _selection_resolved — HTTP endpoint persists the richer version
+                if evt_dict.get("event") != "workflow.selection_resolved":
+                    self._pending_workflow_events.append(evt_dict)
 
         return ExecutorHooks(
             on_step_start=_on_step_start,

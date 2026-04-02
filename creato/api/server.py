@@ -532,7 +532,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             _extract_node_type, _extract_node_type_raw,
         )
         node_type_raw = _extract_node_type_raw(body.node_id)
-        is_split = node_type_raw == "splitText"
+        is_split = node_type_raw in ("splitText", "scriptSplit")
 
         # Build full options list with selected flag
         options = []
@@ -547,15 +547,21 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
             })
 
         try:
-            from creato.database.mongo import agent_messages_col
-            # Get next seq and current turn for this session
+            from creato.database.mongo import agent_messages_col, agent_sessions_col
+            # Get next seq from messages
             max_doc = await agent_messages_col.find_one(
                 {"session_id": snapshot.session_id},
                 sort=[("seq", -1)],
-                projection={"seq": 1, "turn": 1},
+                projection={"seq": 1},
             )
             next_seq = (max_doc["seq"] + 1) if max_doc and "seq" in max_doc else 0
-            current_turn = max_doc.get("turn", 0) if max_doc else 0
+
+            # Get current turn from session metadata (turn_count + 1 = active turn)
+            session_doc = await agent_sessions_col.find_one(
+                {"_id": snapshot.session_id},
+                projection={"turn_count": 1},
+            )
+            current_turn = (session_doc.get("turn_count", 0) + 1) if session_doc else 1
 
             await agent_messages_col.insert_one({
                 "session_id": snapshot.session_id,
