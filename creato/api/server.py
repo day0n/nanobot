@@ -339,6 +339,7 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
         private_context = {
             "auth_token": auth_user.token,
             "flow_id": flow_id,
+            "session_id": session_id,
             "time_zone": x_time_zone.strip() if isinstance(x_time_zone, str) and x_time_zone.strip() else None,
             "user_id": auth_user.user_id,
         }
@@ -526,12 +527,59 @@ def create_app(config: Config, provider: LLMProvider) -> FastAPI:
                 "node_id": body.node_id,
             })
 
+        # 7. Persist selection to agent_messages for history replay
+        from creato.core.tools.opencreator._workflow_callbacks import (
+            _extract_node_type, _extract_node_type_raw,
+        )
+        node_type_raw = _extract_node_type_raw(body.node_id)
+        is_split = node_type_raw == "splitText"
+
+        # Build full options list with selected flag
+        options = []
+        for idx, item in enumerate(expanded, 1):
+            selected = body.selected_indices is None or idx in (body.selected_indices or [])
+            options.append({
+                "index": idx,
+                "model": item.get("model", ""),
+                "output": item.get("output", "") or item.get("result", ""),
+                "type": item.get("type", ""),
+                "selected": selected,
+            })
+
+        try:
+            from creato.database.mongo import agent_messages_col
+            # Get next seq and current turn for this session
+            max_doc = await agent_messages_col.find_one(
+                {"session_id": snapshot.session_id},
+                sort=[("seq", -1)],
+                projection={"seq": 1, "turn": 1},
+            )
+            next_seq = (max_doc["seq"] + 1) if max_doc and "seq" in max_doc else 0
+            current_turn = max_doc.get("turn", 0) if max_doc else 0
+
+            await agent_messages_col.insert_one({
+                "session_id": snapshot.session_id,
+                "seq": next_seq,
+                "role": "workflow_event",
+                "turn": current_turn,
+                "event": "workflow.selection_resolved",
+                "event_data": {
+                    "flow_task_id": body.flow_task_id,
+                    "node_id": body.node_id,
+                    "node_type": _extract_node_type(body.node_id),
+                    "selection_mode": "multi" if is_split else "single",
+                    "selected_indices": body.selected_indices,
+                    "options": options,
+                },
+                "created_at": datetime.now().isoformat(),
+            })
+        except Exception:
+            logger.warning("Failed to persist selection event for {}", body.flow_task_id)
+
         return {
             "status": "ok",
             "node_id": body.node_id,
             "sse_active": sse_active,
-            # If sse_active=false, results will arrive in the next chat turn
-            # when the agent calls continue_workflow.
         }
 
     # ---- GET /v1/agent/sessions — lazy-loaded session list ----

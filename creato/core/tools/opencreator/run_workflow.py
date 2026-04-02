@@ -113,11 +113,13 @@ class RunWorkflowTool(Tool):
             return f"Error: failed to submit workflow — {e}"
 
         # 4a. Store DAG snapshot for restart-based continue
+        session_id = request_context.get("session_id", "")
         store_run_snapshot(flow_task_id, RunSnapshot(
             flow_task_id=flow_task_id,
             ws_id=ws_id,
             nodes=nodes,
             edges=edges,
+            session_id=session_id,
         ))
 
         # 5. Return WorkflowExecution — loop.py will consume the event stream

@@ -350,7 +350,7 @@ class SessionManager:
         """
         query: dict[str, Any] = {
             "session_id": session_id,
-            "role": {"$in": ["user", "agent"]},
+            "role": {"$in": ["user", "agent", "workflow_event"]},
         }
         if before_turn is not None:
             query["turn"] = {"$lt": before_turn}
@@ -377,7 +377,7 @@ class SessionManager:
         messages_cursor = self._messages_col.find(
             {
                 "session_id": session_id,
-                "role": {"$in": ["user", "agent"]},
+                "role": {"$in": ["user", "agent", "workflow_event"]},
                 "turn": {"$in": turn_numbers},
             },
         ).sort([("turn", -1), ("seq", 1)])

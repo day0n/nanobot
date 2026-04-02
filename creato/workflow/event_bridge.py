@@ -89,6 +89,8 @@ class RunSnapshot:
     nodes: list[dict]
     edges: list[dict]
     consumer_run_id: str = ""  # Real run_id from consumer's start_flow event
+    session_id: str = ""       # Agent session_id for persisting workflow events
+    turn: int = 0              # Agent turn number for persisting workflow events
     paused_node_ids: set[str] = field(default_factory=set)
     # node_id → raw node_outputs dict from events
     # e.g. {"text": {"node_id": "xxx", "outputs": [...]}}

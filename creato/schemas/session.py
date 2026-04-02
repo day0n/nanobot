@@ -20,7 +20,7 @@ class StoredMessageDoc(BaseModel):
 
     model_config = {"extra": "allow"}
 
-    role: Literal["user", "agent", "assistant", "tool"]
+    role: Literal["user", "agent", "assistant", "tool", "workflow_event"]
     content: str | list[dict[str, Any]] | None = None
     turn: int | None = None
     tool_calls: list[dict[str, Any]] | None = None
@@ -30,6 +30,8 @@ class StoredMessageDoc(BaseModel):
     thinking_blocks: list[dict[str, Any]] | None = None
     reasoning_content: str | None = None
     metadata: dict[str, Any] | None = None
+    event: str | None = None
+    event_data: dict[str, Any] | None = None
     created_at: str | None = None
 
 

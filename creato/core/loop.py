@@ -195,6 +195,9 @@ class AgentLoop:
     def _build_hooks(self, on_progress: Callable[[AgentEvent], Awaitable[None]] | None) -> ExecutorHooks:
         """Build ExecutorHooks that inject Sentry, PostHog, and SSE dispatch."""
 
+        # Collect workflow events for persistence in _save_turn
+        self._pending_workflow_events: list[dict[str, Any]] = []
+
         async def _on_step_start(step: int) -> None:
             if on_progress:
                 await on_progress(step_started(step))
@@ -227,13 +230,17 @@ class AgentLoop:
                 await on_progress(tool_event(event_name, data))
 
         async def _on_workflow_start(data: dict) -> None:
+            evt = workflow_started(data)
             if on_progress:
-                await on_progress(workflow_started(data))
+                await on_progress(evt)
+            self._pending_workflow_events.append(evt.to_dict())
 
         async def _on_workflow_event(sse_event: Any) -> None:
-            """Forward tool-produced AgentEvent directly to SSE."""
+            """Forward tool-produced AgentEvent directly to SSE and collect for persistence."""
             if on_progress and sse_event:
                 await on_progress(sse_event)
+            if sse_event and hasattr(sse_event, "to_dict"):
+                self._pending_workflow_events.append(sse_event.to_dict())
 
         return ExecutorHooks(
             on_step_start=_on_step_start,
@@ -576,6 +583,21 @@ class AgentLoop:
         session.message_count += display_count
         session.turn_count = turn
         session.updated_at = datetime.now()
+
+        # Append collected workflow events as workflow_event messages
+        # These are display-only (not part of LLM context).
+        wf_events = getattr(self, "_pending_workflow_events", [])
+        if wf_events:
+            now_iso = datetime.now().isoformat()
+            for evt in wf_events:
+                session.messages.append({
+                    "role": "workflow_event",
+                    "turn": turn,
+                    "event": evt.get("event", ""),
+                    "event_data": evt.get("data", {}),
+                    "created_at": now_iso,
+                })
+            self._pending_workflow_events = []
 
     # --- Long-term memory helpers ---
 
