@@ -225,7 +225,10 @@ def _expand_outputs(node_outputs: dict[str, Any]) -> list[dict[str, Any]]:
             item = {**out, "_io_type": io_type}
 
             # splitText: expand formatted_output or JSON-encoded output
-            if io_type == "splitText" or out.get("type") == "splitText":
+            # BUT only if the outputs array has a single item (consumer hasn't pre-split).
+            # If outputs already has multiple items, each item's "output" is already
+            # an individual segment — don't expand formatted_output again.
+            if (io_type == "splitText" or out.get("type") == "splitText") and len(outputs) <= 1:
                 segments = out.get("formatted_output")
                 if not isinstance(segments, list):
                     raw = out.get("output", "")
