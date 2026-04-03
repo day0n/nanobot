@@ -351,11 +351,14 @@ class AgentExecutor:
 
         try:
             async for raw_event in wf_exec.event_stream:
-                # 1. Let the tool convert to SSE event
+                # 1. Let the tool convert to SSE event(s)
                 if wf_exec.make_sse_event:
                     sse = wf_exec.make_sse_event(raw_event)
                     if sse and self.hooks.on_workflow_event:
-                        await self.hooks.on_workflow_event(sse)
+                        # Support both single event and list of events
+                        events = sse if isinstance(sse, list) else [sse]
+                        for evt in events:
+                            await self.hooks.on_workflow_event(evt)
                 elif self.hooks.on_workflow_event:
                     # Fallback: no callback -> forward raw event
                     await self.hooks.on_workflow_event(raw_event)

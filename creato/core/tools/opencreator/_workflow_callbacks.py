@@ -14,6 +14,7 @@ from creato.core.events import (
     WORKFLOW_EVENT_MAP,
     AgentEvent,
     workflow_node_failed,
+    workflow_node_status,
     workflow_select_card,
     workflow_selection_resolved,
 )
@@ -308,10 +309,11 @@ def build_make_sse_event(
     events so the frontend has full context to submit selections via HTTP POST.
     """
 
-    def make_sse_event(raw_event: dict[str, Any]) -> AgentEvent | None:
+    def make_sse_event(raw_event: dict[str, Any]) -> AgentEvent | list[AgentEvent] | None:
         et = raw_event.get("event_type")
 
-        # select node → emit workflow.select_card with enriched card_info
+        # select node → emit BOTH workflow.node_status (for canvas) AND
+        # workflow.select_card (for chat card)
         if et == "node_status" and raw_event.get("status") == "select":
             node_id = raw_event.get("node_id", "")
             event_run_id = raw_event.get("run_id", run_id)
@@ -333,15 +335,22 @@ def build_make_sse_event(
                 "node_outputs": patched_outputs,
                 "card_info": card_info,
             }
-            return workflow_select_card(card_data)
+            return [
+                workflow_node_status(raw_event),
+                workflow_select_card(card_data),
+            ]
 
         # selection resolved via HTTP POST → notify frontend
         if et == "_selection_resolved":
             return workflow_selection_resolved(raw_event)
 
-        # failed node → emit workflow.node_failed SSE with analysis
+        # failed node → emit BOTH workflow.node_status (for canvas) AND
+        # workflow.node_failed (with failure analysis for chat)
         if et == "node_status" and raw_event.get("status") == "failed":
-            return _build_node_failed_sse(raw_event)
+            return [
+                workflow_node_status(raw_event),
+                _build_node_failed_sse(raw_event),
+            ]
 
         # node timeout → also emit workflow.node_failed (workflow continues)
         if et == "node_time_out":
