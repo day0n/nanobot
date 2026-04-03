@@ -34,31 +34,10 @@ def _web_fetch(ctx: AgentContext) -> Tool:
     return WebFetchTool(proxy=ctx.web_proxy)
 
 
-def _get_workflow(ctx: AgentContext) -> Tool:
-    from creato.core.tools.opencreator import GetWorkflowTool
-
-    return GetWorkflowTool(workflow_dao=ctx.workflow_dao)
-
-
 def _get_workflow_results(ctx: AgentContext) -> Tool:
     from creato.core.tools.opencreator import GetWorkflowResultsTool
 
     return GetWorkflowResultsTool(workflow_dao=ctx.workflow_dao)
-
-
-def _get_node_spec(ctx: AgentContext) -> Tool:
-    from creato.core.tools.opencreator import GetNodeSpecTool
-
-    return GetNodeSpecTool()
-
-
-def _edit_workflow(ctx: AgentContext) -> Tool:
-    from creato.core.tools.opencreator import EditWorkflowTool
-
-    return EditWorkflowTool(
-        workflow_dao=ctx.workflow_dao,
-        editor_base=ctx.api_config.editor_base,
-    )
 
 
 def _run_workflow(ctx: AgentContext) -> Tool:
@@ -89,13 +68,10 @@ PROFILE = AgentProfile(
         _read_file,
         _web_search,
         _web_fetch,
-        _get_workflow,
         _get_workflow_results,
-        _get_node_spec,
-        _edit_workflow,
         _run_workflow,
     ),
-    inline_skills=("edit-workflow",),
+    inline_skills=(),
     loadable_skills=("weather", "summarize", "workflow-user-guide"),
     max_iterations=40,
 )

@@ -76,7 +76,7 @@ class AgentLoop:
         factory: AgentFactory | None = None,
         model: str | None = None,
         max_iterations: int = 40,
-        context_window_tokens: int = 65_536,
+        context_window_tokens: int = 120_000,
         web_search_config: WebSearchConfig | None = None,
         web_proxy: str | None = None,
         api_config: ApiServerConfig | None = None,

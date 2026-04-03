@@ -86,7 +86,7 @@ class SubagentTool(Tool, ProgressAware):
                 },
               "agent_type": {
                     "type": "string",
-                    "enum": names or ["researcher"],
+                    "enum": names or ["workflow-editor"],
                     "description": "The type of subagent to spawn.",
                 },
             },

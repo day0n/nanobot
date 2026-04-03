@@ -389,7 +389,6 @@ class SessionManager:
         async for doc in messages_cursor:
             doc.pop("_id", None)
             doc.pop("session_id", None)
-            doc.pop("seq", None)
             # Remove LLM-internal fields from display messages
             doc.pop("tool_calls", None)
             doc.pop("tool_call_id", None)
